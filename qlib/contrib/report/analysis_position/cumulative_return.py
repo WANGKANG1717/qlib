@@ -271,3 +271,55 @@ def cumulative_return_graph(
         BaseGraph.show_graph_in_notebook(_figures)
     else:
         return _figures
+
+
+def save_cumulative_return_graph(
+    position: dict,
+    report_normal: pd.DataFrame,
+    label_data: pd.DataFrame,
+    start_date=None,
+    end_date=None,
+    save_path: str = "cumulative_return_graph.png",
+    width: int = 1200,
+    height: int = 600,
+    scale: int = 2,
+) -> Iterable[go.Figure]:
+    import os
+    from .score_ic import save_graph
+
+    figure_list = list(
+        cumulative_return_graph(
+            position=position,
+            report_normal=report_normal,
+            label_data=label_data,
+            show_notebook=False,
+            start_date=start_date,
+            end_date=end_date,
+        )
+    )
+
+    dir_name = os.path.dirname(save_path)
+    figure_name, suffix = os.path.basename(save_path).rsplit(".", 1)
+
+    for idx, figure in enumerate(figure_list):
+        save_graph(figure, os.path.join(dir_name, f"{figure_name}_{idx}.{suffix}"), width, height, scale)
+
+    return figure_list
+
+
+def _cumulative_return_graph(
+    position: dict,
+    report_normal: pd.DataFrame,
+    label_data: pd.DataFrame,
+    start_date=None,
+    end_date=None,
+    **kwargs,
+) -> Iterable[go.Figure]:
+    return cumulative_return_graph(
+        position=position,
+        report_normal=report_normal,
+        label_data=label_data,
+        show_notebook=False,
+        start_date=start_date,
+        end_date=end_date,
+    )
