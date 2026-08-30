@@ -101,7 +101,7 @@ def _get_monthly_analysis_with_feature(monthly_df: pd.DataFrame, feature: str = 
     """
     _monthly_df_gp = monthly_df.reset_index().groupby(["level_1"], group_keys=False)
 
-    _name_df = _monthly_df_gp.get_group(feature).set_index(["level_0", "level_1"])
+    _name_df = _monthly_df_gp.get_group((feature,)).set_index(["level_0", "level_1"])
     _temp_df = _name_df.pivot_table(index="date", values=["risk"], columns=_name_df.index)
     _temp_df.columns = map(lambda x: "_".join(x[-1]), _temp_df.columns)
     _temp_df.index = _temp_df.index.strftime("%Y-%m")
@@ -295,3 +295,43 @@ def risk_analysis_graph(
         ScatterGraph.show_graph_in_notebook(_figure_list)
     else:
         return _figure_list
+
+
+def save_risk_analysis_graph(
+    analysis_df: pd.DataFrame = None,
+    report_normal_df: pd.DataFrame = None,
+    report_long_short_df: pd.DataFrame = None,
+    save_path: str = "risk_analysis_graph.png",
+    width: int = 1200,
+    height: int = 600,
+    scale: int = 2,
+    **kwargs,
+):
+    import os
+    from .score_ic import save_graph
+
+    figure_list = list(
+        risk_analysis_graph(
+            analysis_df=analysis_df,
+            report_normal_df=report_normal_df,
+            report_long_short_df=report_long_short_df,
+            show_notebook=False,
+        )
+    )
+
+    dir_name = os.path.dirname(save_path)
+    figure_name, suffix = os.path.basename(save_path).rsplit(".", 1)
+
+    for idx, figure in enumerate(figure_list):
+        save_graph(figure, os.path.join(dir_name, f"{figure_name}_{idx}.{suffix}"), width, height, scale)
+
+    return figure_list
+
+
+def _risk_analysis_graph(analysis_df: pd.DataFrame = None, report_normal_df: pd.DataFrame = None, report_long_short_df: pd.DataFrame = None, **kwargs) -> list[list, tuple]:
+    return risk_analysis_graph(
+        analysis_df=analysis_df,
+        report_normal_df=report_normal_df,
+        report_long_short_df=report_long_short_df,
+        show_notebook=False,
+    )
