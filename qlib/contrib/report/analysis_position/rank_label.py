@@ -7,13 +7,11 @@ from typing import Iterable
 import pandas as pd
 import plotly.graph_objs as go
 
-from ..graph import ScatterGraph
 from ..analysis_position.parse_position import get_position_data
+from ..graph import ScatterGraph
 
 
-def _get_figure_with_position(
-    position: dict, label_data: pd.DataFrame, start_date=None, end_date=None
-) -> Iterable[go.Figure]:
+def _get_figure_with_position(position: dict, label_data: pd.DataFrame, start_date=None, end_date=None) -> Iterable[go.Figure]:
     """Get average analysis figures
 
     :param position: position
@@ -48,15 +46,34 @@ def _get_figure_with_position(
     # FIXME: support HIGH-FREQ
     _res_df.index = _res_df.index.strftime("%Y-%m-%d")
     for _col in _res_df.columns:
-        yield ScatterGraph(
+        # 1. 计算当前列序列的算术均值
+        mean_val = float(_res_df[_col].mean())
+
+        # 2. 生成基础折线图
+        fig = ScatterGraph(
             _res_df.loc[:, [_col]],
             layout=dict(
-                title=_col,
+                title=f"{_col} (Mean: {mean_val:.2f}%)",
                 xaxis=dict(type="category", tickangle=45),
                 yaxis=dict(title="lable-rank-ratio: %"),
             ),
             graph_kwargs=dict(mode="lines+markers"),
         ).figure
+
+        # ======================== 核心添加部分 ========================
+        # 添加水平红色均值虚线，并在右上方标注数值
+        fig.add_hline(
+            y=mean_val,
+            line_dash="dash",               # 虚线样式: "dash", "dot", "solid"
+            line_color="red",               # 均值线颜色
+            line_width=1.5,                 # 线宽
+            annotation_text=f"Mean: {mean_val:.2f}",  # 悬浮/固定标注文字
+            annotation_position="top right",          # 标注位置: "top left", "top right", "bottom left" 等
+            annotation_font_color="red",              # 标注文字颜色
+        )
+        # =============================================================
+
+        yield fig
 
 
 def rank_label_graph(
@@ -126,3 +143,46 @@ def rank_label_graph(
         ScatterGraph.show_graph_in_notebook(_figures)
     else:
         return _figures
+
+
+def save_rank_label_graph(
+    position: dict,
+    label_data: pd.DataFrame,
+    start_date=None,
+    end_date=None,
+    save_path: str = "rank_label_graph.png",
+    width: int = 1200,
+    height: int = 600,
+    scale: int = 2,
+    **kwargs,
+):
+    import os
+    from .score_ic import save_graph
+
+    figure_list = list(
+        rank_label_graph(
+            position=position,
+            label_data=label_data,
+            start_date=start_date,
+            end_date=end_date,
+            show_notebook=False,
+        )
+    )
+
+    dir_name = os.path.dirname(save_path)
+    figure_name, suffix = os.path.basename(save_path).rsplit(".", 1)
+
+    for idx, figure in enumerate(figure_list):
+        save_graph(figure, os.path.join(dir_name, f"{figure_name}_{idx}.{suffix}"), width, height, scale)
+
+    return figure_list
+
+
+def _rank_label_graph(position: dict, label_data: pd.DataFrame, start_date=None, end_date=None, **kwargs) -> list[list, tuple]:
+    return rank_label_graph(
+        position=position,
+        label_data=label_data,
+        start_date=start_date,
+        end_date=end_date,
+        show_notebook=False,
+    )
