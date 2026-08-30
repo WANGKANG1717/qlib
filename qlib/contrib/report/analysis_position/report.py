@@ -63,7 +63,7 @@ def _calculate_report_data(df: pd.DataFrame) -> pd.DataFrame:
     return report_df
 
 
-def _report_figure(df: pd.DataFrame) -> [list, tuple]:
+def _report_figure(df: pd.DataFrame) -> list[list, tuple]:
     """
 
     :param df:
@@ -163,7 +163,7 @@ def _report_figure(df: pd.DataFrame) -> [list, tuple]:
     return (figure,)
 
 
-def report_graph(report_df: pd.DataFrame, show_notebook: bool = True) -> [list, tuple]:
+def report_graph(report_df: pd.DataFrame, show_notebook: bool = True) -> list[list, tuple]:
     """display backtest report
 
         Example:
@@ -246,3 +246,22 @@ def report_graph(report_df: pd.DataFrame, show_notebook: bool = True) -> [list, 
         BaseGraph.show_graph_in_notebook(fig_list)
     else:
         return fig_list
+
+
+def save_report_graph(
+    report_df: pd.DataFrame,
+    save_path: str = "report_graph.png",
+    width: int = 1200,
+    height: int = 600,
+    scale: int = 2,
+) -> list[list, tuple]:
+    from .score_ic import save_graph
+
+    figure_list = report_graph(report_df, show_notebook=False)
+    figure = figure_list[0]
+    save_graph(figure, save_path, width, height, scale)
+
+    return figure
+
+def _report_graph(report_df: pd.DataFrame, show_notebook: bool = True, **kwargs) -> list[list, tuple]:
+    return report_graph(report_df, show_notebook=False)
