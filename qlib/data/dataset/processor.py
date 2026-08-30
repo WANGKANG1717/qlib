@@ -417,3 +417,107 @@ class TimeRangeFlt(InstProcessor):
         ):
             return df
         return df.head(0)
+
+# ============================================================
+# 市场 / 行业中性化 Processor（符合 qlib Processor 接口规范）
+# ============================================================
+
+class CSNeutralize(Processor):
+    """
+    横截面市场/行业中性化 Processor（每日截面 OLS 回归取残差）
+
+    对每个交易日的横截面，用风格变量 X（市值 + 行业哑变量等）对每个因子 Y
+    做多元线性回归 Y = X·beta + 残差，取残差作为中性化后的纯净因子（Alpha）。
+
+    参数
+    ----
+    factor_cols : list[str]
+        待中性化的因子列名
+    style_cols : list[str]
+        风格自变量列名（如 ['log_mv', 'Ind_xxx', ...]，市值 + 行业哑变量）。
+        风格列须与 factor_cols 同在传入的 df 中。
+    min_stocks : int
+        当日有效样本数下限，不足则该日因子置为 NaN（回归无统计意义）
+    fit_intercept : bool
+        回归是否含截距，默认 True
+    drop_style : bool
+        中性化后是否从输出中丢弃风格列，默认 True（只保留残差因子）
+
+    用法
+    ----
+    与 qlib 内置 Processor 一致，可直接放进 handler 的 learn/infer_processors；
+    也可脱离 qlib 单独调用：df_out = CSNeutralize(factor_cols, style_cols)(df)
+    """
+
+    def __init__(self, factor_cols, style_cols, min_stocks=50,
+                 fit_intercept=True, drop_style=True):
+        self.factor_cols = list(factor_cols)
+        self.style_cols = list(style_cols)
+        self.min_stocks = min_stocks
+        self.fit_intercept = fit_intercept
+        self.drop_style = drop_style
+
+    def fit(self, df=None):
+        # 截面回归为无状态处理（每日独立），无需拟合全局参数
+        pass
+
+    def _neutralize_daily(self, daily_df):
+        try:
+            from sklearn.linear_model import LinearRegression
+        except:
+            print("导入LinearRegression失败，请检查是否安装sklearn包")
+
+        """单日截面中性化：返回残差因子 DataFrame（index 与输入的有效行对齐）"""
+        # 剔除风格列有缺失的股票（无法进入回归）
+        valid_mask = ~daily_df[self.style_cols].isna().any(axis=1)
+        valid_df = daily_df[valid_mask]
+
+        # 当日有效样本过少，回归无意义，整体置 NaN
+        if len(valid_df) < self.min_stocks:
+            return pd.DataFrame(index=daily_df.index, columns=self.factor_cols)
+
+        X = valid_df[self.style_cols].values
+        # 因子缺失先用截面均值填补，整列全 NaN 再填 0，避免回归矩阵报错
+        Y = (valid_df[self.factor_cols]
+             .fillna(valid_df[self.factor_cols].mean())
+             .fillna(0)
+             .values)
+
+        model = LinearRegression(fit_intercept=self.fit_intercept)
+        model.fit(X, Y)
+        residuals = Y - model.predict(X)
+
+        return pd.DataFrame(residuals, index=valid_df.index, columns=self.factor_cols)
+
+    def __call__(self, df):
+        # tqdm 用于显示进度条
+        from tqdm import tqdm
+        tqdm.pandas(desc="截面中性化进度")
+        # 逐日截面回归取残差
+        res = df.groupby(level="datetime", group_keys=False).progress_apply(self._neutralize_daily)
+        if self.drop_style:
+            return res
+        # 保留风格列：把残差因子写回原 df 对应位置
+        out = df.copy()
+        out[self.factor_cols] = res[self.factor_cols]
+        return out
+
+
+# ============================================================
+# 股票过滤：去除ST和退市股
+# ============================================================
+
+class StockFilterProcessor(Processor):
+    def fit(self, df: pd.DataFrame = None):
+        # 这个处理器不需要计算历史均值/方差等统计量，所以 fit 直接 pass
+        pass
+
+    def __call__(self, df: pd.DataFrame):
+        print("\n[Processor] 股票过滤中，剔除退市和st股...")
+        count_pre = len(df.index.get_level_values("instrument").unique())
+        mask = (df[("raw", "$list_status")] == 0) & (df[("raw", "$is_ST")] == 0)
+        df = df[mask]
+        count_post = len(df.index.get_level_values("instrument").unique())
+        print(f"[Processor] 过滤前：{count_pre}；过滤后：{count_post}\n")
+        
+        return df
