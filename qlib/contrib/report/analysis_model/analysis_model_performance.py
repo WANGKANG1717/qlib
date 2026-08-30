@@ -17,6 +17,12 @@ from qlib.typehint import Literal
 from ..graph import ScatterGraph, SubplotsGraph, BarGraph, HeatmapGraph
 from ..utils import guess_plotly_rangebreaks
 
+from qlib.contrib.report.analysis_position.score_ic import _score_ic_graph
+from qlib.contrib.report.analysis_position.cumulative_return import _cumulative_return_graph
+from qlib.contrib.report.analysis_position.report import _report_graph
+from qlib.contrib.report.analysis_position.rank_label import _rank_label_graph
+from qlib.contrib.report.analysis_position.risk_analysis import _risk_analysis_graph
+
 
 def _group_return(pred_label: pd.DataFrame = None, reverse: bool = False, N: int = 5, **kwargs) -> tuple:
     """
@@ -74,6 +80,19 @@ def _group_return(pred_label: pd.DataFrame = None, reverse: bool = False, N: int
             subplot_titles=["long-short", "long-average"],
         ),
     ).figure
+
+    # ======================== 核心修改部分 ========================
+    # 分别为两张子图（long-short 与 long-average）在 x=0 处添加红色虚线
+    for col_idx in [1, 2]:
+        group_hist_figure.add_vline(
+            x=0,
+            line_width=1.5,
+            line_dash="dash",       # 可选: "solid", "dot", "dash", "longdash"
+            line_color="red",       # 可选颜色: "red", "gray", "black" 等
+            row=1,
+            col=col_idx,
+        )
+    # =============================================================
 
     return group_scatter_figure, group_hist_figure
 
