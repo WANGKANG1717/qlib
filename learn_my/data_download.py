@@ -47,6 +47,7 @@ DIR_META = os.path.join(DATA_ROOT, "meta")
 DIR_STOCK_DAILY = os.path.join(DATA_ROOT, "stock", "daily")
 DIR_INDEX_DAILY = os.path.join(DATA_ROOT, "index", "daily")
 DIR_INDEX_WEIGHT = os.path.join(DATA_ROOT, "index", "weight")
+DIR_FUND_DAILY = os.path.join(DATA_ROOT, "fund", "daily")
 DIR_LOGS = os.path.join(DATA_ROOT, "logs")
 
 # API 请求间隔（秒）与重试设置
@@ -414,7 +415,132 @@ def sync_index_weights(pro, start_date: str, end_date: str):
 
 
 # ==============================================================================
-#                               5. 主调度流程
+#                        5. 场内基金/ETF 日截面同步模块 (Fund Daily)
+# ==============================================================================
+
+
+def sync_fund_basic(pro) -> pd.DataFrame:
+    """同步全量场内基金（ETF/LOF）基础信息表（含上市 L 与 退市 D）"""
+    file_path = os.path.join(DIR_META, "fund_basic.parquet")
+    logging.info("--> 正在同步场内基金 (ETF/LOF) 基础信息表...")
+
+    frames = []
+    for status in ["L", "D"]:
+        df = _retry(
+            lambda: pro.fund_basic(
+                market="E",
+                status=status,
+                fields="ts_code,name,management,custodian,fund_type,found_date,due_date,list_date,issue_date,delist_date,issue_amount,m_fee,c_fee,duration_year,p_value,min_amount,exp_return,benchmark,status,invest_type,type,trustee,purc_startdate,redm_startdate,market",
+            ),
+            desc=f"获取状态为 {status} 的场内基金列表",
+        )
+        if df is not None and not df.empty:
+            frames.append(df)
+        time.sleep(SLEEP_SECONDS)
+
+    if frames:
+        all_funds = pd.concat(frames, ignore_index=True).drop_duplicates(subset=["ts_code"]).reset_index(drop=True)
+        atomic_save_parquet(all_funds, file_path)
+        logging.info("场内基金基础信息同步完成，共计 %d 只", len(all_funds))
+        return all_funds
+    elif os.path.exists(file_path):
+        return pd.read_parquet(file_path)
+    return pd.DataFrame()
+
+
+def sync_one_day_fund(pro, trade_date: str) -> bool:
+    """
+    拉取单日全量场内 ETF/LOF 数据并横向合并为全量宽表：
+    1. 不复权日行情 (fund_daily)
+    2. 基金复权因子 (fund_adj)
+    3. 每日基金净值与资产 (fund_nav)
+    4. 场内基金份额 (fund_share)
+    5. 衍生量化指标：折溢价率 (discount_rate)
+    """
+    out_file = os.path.join(DIR_FUND_DAILY, f"{trade_date}.parquet")
+    if os.path.exists(out_file):
+        return True
+
+    # 1. 获取场内不复权行情 (OHLCV)
+    df_bar = _retry(
+        lambda: pro.fund_daily(
+            trade_date=trade_date,
+            fields="ts_code,trade_date,open,high,low,close,pre_close,change,pct_chg,vol,amount",
+        ),
+        desc=f"ETF 日线行情 {trade_date}",
+    )
+    time.sleep(SLEEP_SECONDS)
+
+    if df_bar is None or df_bar.empty:
+        logging.warning("交易日 %s 场内基金行情为空，跳过", trade_date)
+        return False
+
+    # 2. 获取基金专属复权因子
+    df_adj = _retry(
+        lambda: pro.fund_adj(
+            trade_date=trade_date,
+            fields="ts_code,trade_date,adj_factor",
+        ),
+        desc=f"ETF 复权因子 {trade_date}",
+    )
+    time.sleep(SLEEP_SECONDS)
+
+    # 3. 获取当日净值及资产规模 (按 nav_date 匹配)
+    df_nav = _retry(
+        lambda: pro.fund_nav(
+            nav_date=trade_date,
+            fields="ts_code,ann_date,nav_date,unit_nav,accum_nav,accum_div,net_asset,total_netasset,adj_nav",
+        ),
+        desc=f"ETF 净值数据 {trade_date}",
+    )
+    time.sleep(SLEEP_SECONDS)
+
+    # 4. 获取场内基金流通份额规模 (fund_share)
+    df_share = _retry(
+        lambda: pro.fund_share(
+            trade_date=trade_date,
+            fields="ts_code,trade_date,fd_share",
+        ),
+        desc=f"ETF 份额数据 {trade_date}",
+    )
+    time.sleep(SLEEP_SECONDS)
+
+    # 横向对齐合并宽表
+    merged = df_bar.copy()
+
+    # 合并复权因子
+    if df_adj is not None and not df_adj.empty:
+        merged = pd.merge(merged, df_adj[["ts_code", "adj_factor"]], on="ts_code", how="left")
+    else:
+        merged["adj_factor"] = 1.0
+
+    # 合并净值与资产
+    if df_nav is not None and not df_nav.empty:
+        # 去重防止极端情况下同一基金多条记录
+        df_nav = df_nav.drop_duplicates(subset=["ts_code"])
+        merged = pd.merge(merged, df_nav, on="ts_code", how="left")
+
+    # 合并份额
+    if df_share is not None and not df_share.empty:
+        df_share = df_share.drop_duplicates(subset=["ts_code"])
+        merged = pd.merge(merged, df_share[["ts_code", "fd_share"]], on="ts_code", how="left")
+
+    # 5. 衍生核心量化特征：计算折溢价率 (Discount Rate %)
+    # 公式：(收盘价 - 单位净值) / 单位净值 * 100
+    if "unit_nav" in merged.columns:
+        merged["discount_rate"] = ((merged["close"] - merged["unit_nav"]) / merged["unit_nav"] * 100).round(4)
+
+    # 规整与排序
+    merged["trade_date"] = trade_date
+    merged = merged.sort_values("ts_code").reset_index(drop=True)
+
+    # 原子落盘
+    atomic_save_parquet(merged, out_file)
+    return True
+
+
+# ==============================================================================
+#                               6. 主调度流程
 # ==============================================================================
 
 
@@ -435,6 +561,7 @@ def main():
     trade_cal_df = sync_trade_cal(pro, start_year=req_start[:4])
     sync_stock_basic(pro)
     sync_index_basic(pro)
+    sync_fund_basic(pro)
 
     # 4. 获取区间内所有「真实开市交易日」
     open_days = trade_cal_df[(trade_cal_df["is_open"] == 1) & (trade_cal_df["cal_date"] >= req_start) & (trade_cal_df["cal_date"] <= req_end)]["cal_date"].tolist()
@@ -442,17 +569,19 @@ def main():
     total_days = len(open_days)
     logging.info("区间内共计 %d 个实际交易日需要检查/同步", total_days)
 
-    # 5. 按交易日截面流水线同步 (股票日宽表 + 指数日宽表)
-    success_stock, success_index = 0, 0
+    # 5. 按交易日截面流水线同步 (股票 + 指数 + ETF)
+    success_stock, success_index, success_fund = 0, 0, 0
     os.makedirs(DIR_STOCK_DAILY, exist_ok=True)
     os.makedirs(DIR_INDEX_DAILY, exist_ok=True)
+    os.makedirs(DIR_FUND_DAILY, exist_ok=True)
 
     for idx, trade_date in enumerate(open_days, 1):
         stock_file_exists = os.path.exists(os.path.join(DIR_STOCK_DAILY, f"{trade_date}.parquet"))
         index_file_exists = os.path.exists(os.path.join(DIR_INDEX_DAILY, f"{trade_date}.parquet"))
+        fund_file_exists = os.path.exists(os.path.join(DIR_FUND_DAILY, f"{trade_date}.parquet"))
 
-        # 如果两者均已在本地，直接跳过（增量秒级检测）
-        if stock_file_exists and index_file_exists:
+        # 如果三者都已存在，直接跳过
+        if stock_file_exists and index_file_exists and fund_file_exists:
             continue
 
         logging.info("[%d/%d] 正在处理交易日: %s", idx, total_days, trade_date)
@@ -467,12 +596,17 @@ def main():
             if sync_one_day_index(pro, trade_date):
                 success_index += 1
 
+        # 同步 ETF 日截面 (新增)
+        if not fund_file_exists:
+            if sync_one_day_fund(pro, trade_date):
+                success_fund += 1
+
     # 6. 同步指数成分与权重
     sync_index_weights(pro, req_start, req_end)
 
     logging.info("=" * 60)
     logging.info("✅ 数据仓库同步完成！")
-    logging.info("新增/补齐股票截面: %d 天 | 新增/补齐指数截面: %d 天", success_stock, success_index)
+    logging.info("新增/补齐股票: %d 天 | 指数: %d 天 | ETF: %d 天", success_stock, success_index, success_fund)
     logging.info("数据仓库路径: %s", os.path.abspath(DATA_ROOT))
 
 
