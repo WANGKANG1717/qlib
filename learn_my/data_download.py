@@ -240,6 +240,10 @@ def sync_one_day_stock(pro, trade_date: str) -> bool:
         desc=f"股票日线行情 {trade_date}",
     )
     time.sleep(SLEEP_SECONDS)
+    # 【校验 1】：行情接口报错或当天非交易日，坚决不落盘
+    if df_bar is None or df_bar.empty:
+        logging.warning("交易日 %s 股票行情数据为空，跳过", trade_date)
+        return False
 
     # 2. 获取复权因子
     df_adj = _retry(
@@ -247,6 +251,10 @@ def sync_one_day_stock(pro, trade_date: str) -> bool:
         desc=f"股票复权因子 {trade_date}",
     )
     time.sleep(SLEEP_SECONDS)
+    # 【校验 2】：因子接口若报错，说明网络异常，直接放弃当天，不落盘！
+    if df_adj is None:
+        logging.error("交易日 %s 复权因子拉取失败，放弃本次落盘", trade_date)
+        return False
 
     # 3. 获取每日基本面估值指标
     df_basic = _retry(
@@ -257,21 +265,20 @@ def sync_one_day_stock(pro, trade_date: str) -> bool:
         desc=f"股票每日指标 {trade_date}",
     )
     time.sleep(SLEEP_SECONDS)
-
-    # 如果行情本身为空（例如极特殊休市或非交易数据），则不落盘
-    if df_bar is None or df_bar.empty:
-        logging.warning("交易日 %s 股票行情数据为空，跳过", trade_date)
+    # 【校验 3】：基本面指标接口若报错，直接放弃当天，不落盘！
+    if df_basic is None:
+        logging.error("交易日 %s 基本面指标拉取失败，放弃本次落盘", trade_date)
         return False
 
     # 横向对齐合并 (以 ts_code 为主键)
     merged = df_bar.copy()
 
-    if df_adj is not None and not df_adj.empty:
+    if not df_adj.empty:
         merged = pd.merge(merged, df_adj[["ts_code", "adj_factor"]], on="ts_code", how="left")
     else:
         merged["adj_factor"] = 1.0
 
-    if df_basic is not None and not df_basic.empty:
+    if not df_basic.empty:
         # 剔除 daily_basic 中重复的 close 列，避免合并冲突
         basic_cols = [c for c in df_basic.columns if c not in ["close", "trade_date"]]
         merged = pd.merge(merged, df_basic[basic_cols], on="ts_code", how="left")
@@ -305,6 +312,8 @@ def sync_one_day_index(pro, trade_date: str) -> bool:
         desc=f"指数日行情 {trade_date}",
     )
     time.sleep(SLEEP_SECONDS)
+    if df_daily is None or df_daily.empty:
+        return False
 
     # 2. 获取指数估值与流动性指标
     df_basic = _retry(
@@ -313,7 +322,8 @@ def sync_one_day_index(pro, trade_date: str) -> bool:
     )
     time.sleep(SLEEP_SECONDS)
 
-    if df_daily is None or df_daily.empty:
+    if df_basic is None:
+        logging.error("交易日 %s 指数指标拉取失败，放弃本次落盘", trade_date)
         return False
 
     # 过滤出核心关注指数
@@ -322,7 +332,7 @@ def sync_one_day_index(pro, trade_date: str) -> bool:
         return False
 
     merged = df_daily
-    if df_basic is not None and not df_basic.empty:
+    if not df_basic.empty:
         basic_cols = [c for c in df_basic.columns if c not in ["trade_date"]]
         merged = pd.merge(merged, df_basic[basic_cols], on="ts_code", how="left")
 
@@ -484,6 +494,9 @@ def sync_one_day_fund(pro, trade_date: str) -> bool:
         desc=f"ETF 复权因子 {trade_date}",
     )
     time.sleep(SLEEP_SECONDS)
+    if df_adj is None:
+        logging.error("交易日 %s ETF复权因子拉取失败，放弃本次落盘", trade_date)
+        return False
 
     # 3. 获取当日净值及资产规模 (按 nav_date 匹配)
     df_nav = _retry(
@@ -494,6 +507,9 @@ def sync_one_day_fund(pro, trade_date: str) -> bool:
         desc=f"ETF 净值数据 {trade_date}",
     )
     time.sleep(SLEEP_SECONDS)
+    if df_nav is None:
+        logging.error("交易日 %s ETF净值拉取失败，放弃本次落盘", trade_date)
+        return False
 
     # 4. 获取场内基金流通份额规模 (fund_share)
     df_share = _retry(
@@ -504,24 +520,27 @@ def sync_one_day_fund(pro, trade_date: str) -> bool:
         desc=f"ETF 份额数据 {trade_date}",
     )
     time.sleep(SLEEP_SECONDS)
+    if df_share is None:
+        logging.error("交易日 %s ETF份额拉取失败，放弃本次落盘", trade_date)
+        return False
 
     # 横向对齐合并宽表
     merged = df_bar.copy()
 
     # 合并复权因子
-    if df_adj is not None and not df_adj.empty:
+    if not df_adj.empty:
         merged = pd.merge(merged, df_adj[["ts_code", "adj_factor"]], on="ts_code", how="left")
     else:
         merged["adj_factor"] = 1.0
 
     # 合并净值与资产
-    if df_nav is not None and not df_nav.empty:
+    if not df_nav.empty:
         # 去重防止极端情况下同一基金多条记录
         df_nav = df_nav.drop_duplicates(subset=["ts_code"])
         merged = pd.merge(merged, df_nav, on="ts_code", how="left")
 
     # 合并份额
-    if df_share is not None and not df_share.empty:
+    if not df_share.empty:
         df_share = df_share.drop_duplicates(subset=["ts_code"])
         merged = pd.merge(merged, df_share[["ts_code", "fd_share"]], on="ts_code", how="left")
 
