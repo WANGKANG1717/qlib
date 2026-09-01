@@ -43,20 +43,36 @@ TEMP_CSV_DIR = os.path.join(DATA_ROOT, "temp_csv_for_qlib")
 # 包含的基础行情与基本面字段 (导出到 Qlib)
 # 基础行情必须包含: open, close, high, low, volume, money, factor
 STOCK_FIELDS = [
-    "open", "high", "low", "close", "volume", "money", "factor", "vwap",
-    "turnover_rate", "turnover_rate_f", "pe", "pe_ttm", "pb", "ps", "ps_ttm",
-    "dv_ratio", "dv_ttm", "total_mv", "circ_mv"
+    "open",
+    "high",
+    "low",
+    "close",
+    "volume",
+    "money",
+    "factor",
+    "vwap",
+    "turnover_rate",
+    "turnover_rate_f",
+    "pe",
+    "pe_ttm",
+    "pb",
+    "ps",
+    "ps_ttm",
+    "dv_ratio",
+    "dv_ttm",
+    "total_mv",
+    "circ_mv",
 ]
 
 # 指数权重到 Qlib 股票池的映射配置 (代码 -> 文件名)
 INDEX_INSTRUMENT_MAP = {
-    "000300.SH": "csi300.txt",
-    "000905.SH": "csi500.txt",
-    "000852.SH": "csi1000.txt",
-    "000016.SH": "csi50.txt",
-    "000906.SH": "csi800.txt",
     "399006.SZ": "chinext.txt",
     "000688.SH": "star50.txt",
+    "000016.SH": "csi50.txt",
+    "000300.SH": "csi300.txt",
+    "000905.SH": "csi500.txt",
+    "000906.SH": "csi800.txt",
+    "000852.SH": "csi1000.txt",
 }
 
 # 并行转换线程数
@@ -85,10 +101,11 @@ def to_qlib_symbol(ts_code: str) -> str:
 #                       1. 数据重组模块 (DuckDB 极速引擎)
 # ==============================================================================
 
+
 def export_parquet_to_symbol_csv():
     """使用 DuckDB 扫描全量日截面 Parquet，按 symbol 分区极速导出为单文件 CSV"""
     logging.info("--> [步骤 1/3] 使用 DuckDB 极速重组日截面数据为单标的 CSV...")
-    
+
     if os.path.exists(TEMP_CSV_DIR):
         shutil.rmtree(TEMP_CSV_DIR)
     os.makedirs(TEMP_CSV_DIR, exist_ok=True)
@@ -104,11 +121,24 @@ def export_parquet_to_symbol_csv():
                 SELECT 
                     strftime(strptime(trade_date::VARCHAR, '%Y%m%d'), '%Y-%m-%d') AS date,
                     regexp_replace(ts_code, '^([0-9]+)\.([A-Za-z]+)$', '\\2\\1') AS symbol,
-                    open, high, low, close,
+                    
+                    -- 核心：转换为后复权价格 (Raw * Factor)
+                    ROUND(open * COALESCE(adj_factor, 1.0), 4) AS open,
+                    ROUND(high * COALESCE(adj_factor, 1.0), 4) AS high,
+                    ROUND(low * COALESCE(adj_factor, 1.0), 4) AS low,
+                    ROUND(close * COALESCE(adj_factor, 1.0), 4) AS close,
+                    
+                    -- 量纲换算: 手 -> 股, 千元 -> 元
                     COALESCE(vol * 100, 0.0) AS volume,
                     COALESCE(amount * 1000, 0.0) AS money,
                     COALESCE(adj_factor, 1.0) AS factor,
-                    CASE WHEN vol > 0 THEN (amount * 1000) / (vol * 100) ELSE close END AS vwap,
+                    
+                    -- 后复权 VWAP (成交均价 * factor)
+                    CASE 
+                        WHEN vol > 0 THEN ROUND(((amount * 1000) / (vol * 100)) * COALESCE(adj_factor, 1.0), 4)
+                        ELSE ROUND(close * COALESCE(adj_factor, 1.0), 4)
+                    END AS vwap,
+                    
                     turnover_rate, turnover_rate_f, pe, pe_ttm, pb, ps, ps_ttm,
                     dv_ratio, dv_ttm, total_mv, circ_mv
                 FROM '{stock_dir}/*.parquet'
@@ -154,11 +184,22 @@ def export_parquet_to_symbol_csv():
                 SELECT 
                     strftime(strptime(trade_date::VARCHAR, '%Y%m%d'), '%Y-%m-%d') AS date,
                     regexp_replace(ts_code, '^([0-9]+)\.([A-Za-z]+)$', '\\2\\1') AS symbol,
-                    open, high, low, close,
+                    
+                    -- ETF 后复权价格 (Raw * Factor)
+                    ROUND(open * COALESCE(adj_factor, 1.0), 4) AS open,
+                    ROUND(high * COALESCE(adj_factor, 1.0), 4) AS high,
+                    ROUND(low * COALESCE(adj_factor, 1.0), 4) AS low,
+                    ROUND(close * COALESCE(adj_factor, 1.0), 4) AS close,
+                    
                     COALESCE(vol * 100, 0.0) AS volume,
                     COALESCE(amount * 1000, 0.0) AS money,
                     COALESCE(adj_factor, 1.0) AS factor,
-                    CASE WHEN vol > 0 THEN (amount * 1000) / (vol * 100) ELSE close END AS vwap,
+                    
+                    CASE 
+                        WHEN vol > 0 THEN ROUND(((amount * 1000) / (vol * 100)) * COALESCE(adj_factor, 1.0), 4)
+                        ELSE ROUND(close * COALESCE(adj_factor, 1.0), 4)
+                    END AS vwap,
+                    
                     NULL AS turnover_rate, NULL AS turnover_rate_f, NULL AS pe, NULL AS pe_ttm, NULL AS pb, NULL AS ps, NULL AS ps_ttm,
                     NULL AS dv_ratio, NULL AS dv_ttm, total_netasset AS total_mv, net_asset AS circ_mv
                 FROM '{fund_dir}/*.parquet'
@@ -194,27 +235,36 @@ def export_parquet_to_symbol_csv():
 #                       2. 调用 Qlib 转二进制矩阵模块
 # ==============================================================================
 
+
 def run_qlib_dump_bin():
     """调用 Qlib 官方 dump_bin 模块生成高性能 .bin 二进制文件"""
     logging.info("--> [步骤 2/3] 调用 Qlib dump_bin 编译生成二进制矩阵 (features/*.bin)...")
-    
+
     include_fields_str = ",".join(STOCK_FIELDS)
     cmd = [
         sys.executable,
-        "-m", "qlib.dump_bin", "dump_all",
-        "--csv_path", TEMP_CSV_DIR,
-        "--qlib_dir", QLIB_DIR,
-        "--symbol_field_name", "symbol",
-        "--date_field_name", "date",
-        "--include_fields", include_fields_str,
-        "--max_workers", str(MAX_WORKERS),
+        "-m",
+        "qlib.dump_bin",
+        "dump_all",
+        "--csv_path",
+        TEMP_CSV_DIR,
+        "--qlib_dir",
+        QLIB_DIR,
+        "--symbol_field_name",
+        "symbol",
+        "--date_field_name",
+        "date",
+        "--include_fields",
+        include_fields_str,
+        "--max_workers",
+        str(MAX_WORKERS),
     ]
-    
+
     logging.info("执行命令: %s", " ".join(cmd))
     result = subprocess.run(cmd)
     if result.returncode != 0:
         raise RuntimeError("Qlib dump_bin 执行失败，请检查上方报错！")
-    
+
     logging.info("✅ Qlib 二进制底层库编译成功！")
 
 
@@ -222,13 +272,14 @@ def run_qlib_dump_bin():
 #                 3. 构建成分股股票池 (instruments/*.txt)
 # ==============================================================================
 
+
 def build_index_instruments():
     """
     根据 index/weight/ 目录下的历史权重，生成 Qlib 标准的成分股区间池
     格式: <symbol>\t<start_date>\t<end_date>
     """
     logging.info("--> [步骤 3/3] 正在根据历史权重生成 Qlib 成分股池 (instruments/*.txt)...")
-    
+
     weight_dir = os.path.join(DATA_ROOT, "index", "weight")
     instruments_dir = os.path.join(QLIB_DIR, "instruments")
     os.makedirs(instruments_dir, exist_ok=True)
@@ -262,7 +313,7 @@ def build_index_instruments():
 
         # 获取所有调仓点
         weight_dates = sorted(df_weight["trade_date"].unique())
-        
+
         # 计算每个成份股在指数内的生效起止时间区间
         records = []
         for symbol, gp in df_weight.groupby("symbol"):
@@ -270,7 +321,7 @@ def build_index_instruments():
             # 找到连续持有的区间
             start_d = None
             last_d = None
-            
+
             for d in weight_dates:
                 if d in in_dates:
                     if start_d is None:
@@ -297,6 +348,7 @@ def build_index_instruments():
 # ==============================================================================
 #                                  主入口
 # ==============================================================================
+
 
 def main(clean_temp_csv: bool = True):
     setup_logging()
