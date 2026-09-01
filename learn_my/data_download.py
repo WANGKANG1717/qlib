@@ -7,12 +7,14 @@ A 股股票 + 核心指数「日截面数据仓库」自动化同步脚本
 2. 股票日截面层 (stock/daily/)：单交易日全市场宽表 (行情 + 复权因子 + 每日基本面指标)。
 3. 指数日截面层 (index/daily/)：单交易日核心指数宽表 (指数日行情 + 指数每日估值指标)。
 4. 指数成分与权重 (index/weight/)：主流宽基指数成分股与权重变动表。
+5. 基金ETF日截面层 (fund/daily/)：不复权日行情 + 复权因子 + 每日基金净值与资产 + 场内基金份额 + 折溢价率
 
 设计特性：
 - 按日截面拉取：单日只需 3 次请求拉完全市场 5000+ 股票，规避 API 频控。
 - 自动断点补漏：比对交易日历与本地已有文件，只请求缺失的交易日。
 - 原子落盘机制：临时文件 + os.replace，保证任何异常中断均不产生脏数据。
 - 采用 Parquet 列式存储：体积减少 75%，读取与多因子计算速度提升 10 倍以上。
+- 对k线数据采取严格判空，拉取失败/为空都不落盘，其余类型数据（如复权因子，基本面信息）只要不拉取失败均不影响落盘
 """
 
 import logging
@@ -242,7 +244,7 @@ def sync_one_day_stock(pro, trade_date: str) -> bool:
     time.sleep(SLEEP_SECONDS)
     # 【校验 1】：行情接口报错或当天非交易日，坚决不落盘
     if df_bar is None or df_bar.empty:
-        logging.warning("交易日 %s 股票行情数据为空，跳过", trade_date)
+        logging.warning("交易日 %s 股票行情数据%s，跳过", trade_date, "拉取失败" if df_bar is None else "为空")
         return False
 
     # 2. 获取复权因子
@@ -313,6 +315,7 @@ def sync_one_day_index(pro, trade_date: str) -> bool:
     )
     time.sleep(SLEEP_SECONDS)
     if df_daily is None or df_daily.empty:
+        logging.warning("交易日 %s 指数日行情数据%s，跳过", trade_date, "拉取失败" if df_daily is None else "为空")
         return False
 
     # 2. 获取指数估值与流动性指标
@@ -407,7 +410,7 @@ def sync_index_weights(pro, start_date: str, end_date: str):
             if df_month is not None and not df_month.empty:
                 frames.append(df_month)
 
-            time.sleep(SLEEP_SECONDS)
+            time.sleep(SLEEP_SECONDS * 2)
         # =============================================================
 
         if frames:
@@ -482,7 +485,7 @@ def sync_one_day_fund(pro, trade_date: str) -> bool:
     time.sleep(SLEEP_SECONDS)
 
     if df_bar is None or df_bar.empty:
-        logging.warning("交易日 %s 场内基金行情为空，跳过", trade_date)
+        logging.warning("交易日 %s 场内基金行情%s，跳过", trade_date, "拉取失败" if df_bar is None else "为空")
         return False
 
     # 2. 获取基金专属复权因子
