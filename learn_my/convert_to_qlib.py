@@ -32,7 +32,7 @@ except ImportError:
 #                                  配置区
 # ==============================================================================
 # 数据仓库源根目录
-DATA_ROOT = os.path.expanduser(os.getenv("DATA_ROOT", "stock_data_warehouse"))
+DATA_ROOT = os.path.expanduser(os.getenv("DATA_ROOT", "stock_data_warehouse_old"))
 
 # 目标 Qlib 数据目录 (默认存储在 ~/.qlib/qlib_data/cn_data)
 QLIB_DIR = os.path.expanduser(os.getenv("QLIB_DIR", "~/.qlib/qlib_data/my_tushare_data_new"))
@@ -66,13 +66,20 @@ STOCK_FIELDS = [
 
 # 指数权重到 Qlib 股票池的映射配置 (代码 -> 文件名)
 INDEX_INSTRUMENT_MAP = {
-    "399006.SZ": "chinext.txt",
-    "000688.SH": "star50.txt",
-    "000016.SH": "csi50.txt",
-    "000300.SH": "csi300.txt",
-    "000905.SH": "csi500.txt",
-    "000906.SH": "csi800.txt",
-    "000852.SH": "csi1000.txt",
+    "399006.SZ": "chinext.txt",  # 创业板指
+    "000688.SH": "star50.txt",  # 科创50
+    "000016.SH": "csi50.txt",  # 上证50
+    "000300.SH": "csi300.txt",  # 沪深300
+    "000905.SH": "csi500.txt",  # 中证500
+    "000906.SH": "csi800.txt",  # 中证800
+    "000852.SH": "csi1000.txt",  # 中证1000
+}
+
+SECTOR_INSTRUMENT_MAP = {
+    "主板": "zb.txt",  # 主板 (沪市主板 + 深市主板)
+    "创业板": "cyb.txt",  # 创业板
+    "科创板": "kcb.txt",  # 科创板
+    "北交所": "bjs.txt",  # 北交所
 }
 
 # 并行转换线程数
@@ -346,6 +353,72 @@ def build_index_instruments():
 
 
 # ==============================================================================
+#                 3. 构建板块股票池函数 (instruments/*.txt)
+# ==============================================================================
+
+
+def build_market_sector_instruments():
+    """
+    读取 meta/stock_basic.parquet，根据 market 字段自动生成各板块股票池：
+    zb.txt (主板), cyb.txt (创业板), kcb.txt (科创板), bjs.txt (北交所)
+    格式: <symbol>\t<list_date>\t<delist_date_or_latest>
+    """
+    logging.info("--> 正在生成各板块股票池 (zb.txt, cyb.txt, kcb.txt, bjs.txt)...")
+
+    basic_file = os.path.join(DATA_ROOT, "meta", "stock_basic.parquet")
+    cal_file = os.path.join(QLIB_DIR, "calendars", "day.txt")
+    instruments_dir = os.path.join(QLIB_DIR, "instruments")
+    os.makedirs(instruments_dir, exist_ok=True)
+
+    if not os.path.exists(basic_file) or not os.path.exists(cal_file):
+        logging.warning("缺少 stock_basic.parquet 或交易日历，跳过板块股票池生成")
+        return
+
+    # 读取日历最新日期（作为当前在市股票的结束日期）
+    with open(cal_file, "r", encoding="utf-8") as f:
+        latest_date = [line.strip() for line in f if line.strip()][-1]
+
+    df_basic = pd.read_parquet(basic_file)
+    if df_basic.empty:
+        return
+
+    for market_name, out_filename in SECTOR_INSTRUMENT_MAP.items():
+        # 筛选对应板块的股票
+        df_sub = df_basic[df_basic["market"] == market_name].copy()
+        if df_sub.empty:
+            continue
+
+        records = []
+        for _, row in df_sub.iterrows():
+            symbol = to_qlib_symbol(row["ts_code"])
+
+            # 上市日期格式化: YYYYMMDD -> YYYY-MM-DD
+            list_d = str(row["list_date"])
+            if len(list_d) == 8:
+                start_date = f"{list_d[:4]}-{list_d[4:6]}-{list_d[6:]}"
+            else:
+                continue
+
+            # 退市日期处理 (若未退市则取最新交易日)
+            delist_d = str(row.get("delist_date", ""))
+            if len(delist_d) == 8:
+                end_date = f"{delist_d[:4]}-{delist_d[4:6]}-{delist_d[6:]}"
+            else:
+                end_date = latest_date
+
+            records.append(f"{symbol}\t{start_date}\t{end_date}\n")
+
+        # 写入 instruments/{name}.txt
+        target_path = os.path.join(instruments_dir, out_filename)
+        with open(target_path, "w", encoding="utf-8") as f:
+            f.writelines(sorted(records))
+
+        logging.info("  已生成 %s 板块股票池 -> %s (共 %d 只股票)", market_name, out_filename, len(records))
+
+    logging.info("✅ 板块股票池生成完毕！")
+
+
+# ==============================================================================
 #                                  主入口
 # ==============================================================================
 
@@ -366,7 +439,10 @@ def main(clean_temp_csv: bool = True):
     # 3. 构建动态指数股票池
     build_index_instruments()
 
-    # 4. 清理临时 CSV 文件
+    # 4. 构建板块股票池 (主板 zb, 创业板 cyb, 科创板 kcb, 北交所 bjs)
+    build_market_sector_instruments()
+
+    # 5. 清理临时 CSV 文件
     if clean_temp_csv and os.path.exists(TEMP_CSV_DIR):
         logging.info("--> 正在清理临时 CSV 文件夹...")
         shutil.rmtree(TEMP_CSV_DIR)
