@@ -213,6 +213,16 @@ def sync_one_day_stock(pro, trade_date: str) -> bool:
     out_file = os.path.join(DIR_STOCK_DAILY, f"{trade_date}.parquet")
     if os.path.exists(out_file):
         return True
+    # 以下代码用于重新拉取数据有缺失的数据
+    # required_cols = {"amount", "adj_factor", "turnover_rate_f"} # 关键字段检查，确保宽表完整性
+    # if os.path.exists(out_file):
+    #     old_cols = set(pd.read_parquet(out_file, columns=None).columns)
+    #     if required_cols.issubset(old_cols):
+    #         logging.info("交易日 %s 股票日截面宽表已存在且关键字段完整，跳过", trade_date)
+    #         return True
+    #     logging.info("交易日 %s 股票日截面宽表缺失关键字段，重新拉取", trade_date)
+    # else:
+    #     logging.info("交易日 %s 股票日截面宽表不存在，开始拉取", trade_date)
 
     # 1. 获取不复权行情
     df_bar = _retry(
