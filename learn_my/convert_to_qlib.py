@@ -163,7 +163,7 @@ def export_parquet_to_symbol_csv():
     #     logging.info("  正在处理核心指数数据...")
     #     query_index = f"""
     #         COPY (
-    #             SELECT 
+    #             SELECT
     #                 strftime(strptime(trade_date::VARCHAR, '%Y%m%d'), '%Y-%m-%d') AS date,
     #                 regexp_replace(ts_code, '^([0-9]+)\.([A-Za-z]+)$', '\\2\\1') AS symbol,
     #                 open, high, low, close,
@@ -188,25 +188,24 @@ def export_parquet_to_symbol_csv():
     #     logging.info("  正在处理 ETF 场内基金数据...")
     #     query_fund = f"""
     #         COPY (
-    #             SELECT 
+    #             SELECT
     #                 strftime(strptime(trade_date::VARCHAR, '%Y%m%d'), '%Y-%m-%d') AS date,
     #                 regexp_replace(ts_code, '^([0-9]+)\.([A-Za-z]+)$', '\\2\\1') AS symbol,
-                    
+
     #                 -- ETF 后复权价格 (Raw * Factor)
     #                 ROUND(open * COALESCE(adj_factor, 1.0), 4) AS open,
     #                 ROUND(high * COALESCE(adj_factor, 1.0), 4) AS high,
     #                 ROUND(low * COALESCE(adj_factor, 1.0), 4) AS low,
     #                 ROUND(close * COALESCE(adj_factor, 1.0), 4) AS close,
-                    
     #                 COALESCE(vol * 100, 0.0) AS volume,
     #                 COALESCE(amount * 1000, 0.0) AS amount,
     #                 COALESCE(adj_factor, 1.0) AS factor,
-                    
-    #                 CASE 
+
+    #                 CASE
     #                     WHEN vol > 0 THEN ROUND(((amount * 1000) / (vol * 100)) * COALESCE(adj_factor, 1.0), 4)
     #                     ELSE ROUND(close * COALESCE(adj_factor, 1.0), 4)
     #                 END AS vwap,
-                    
+
     #                 NULL AS turnover_rate, NULL AS turnover_rate_f, NULL AS pe, NULL AS pe_ttm, NULL AS pb, NULL AS ps, NULL AS ps_ttm,
     #                 NULL AS dv_ratio, NULL AS dv_ttm, total_netasset AS total_mv, net_asset AS circ_mv
     #             FROM '{fund_dir}/*.parquet'
@@ -360,61 +359,57 @@ def build_index_instruments():
 
 def build_market_sector_instruments():
     """
-    读取 meta/stock_basic.parquet，根据 market 字段自动生成各板块股票池：
-    zb.txt (主板), cyb.txt (创业板), kcb.txt (科创板), bjs.txt (北交所)
-    格式: <symbol>\t<list_date>\t<delist_date_or_latest>
+    将股票基本信息按市场板块转换为 qlib instruments 格式
+    注意：本函数依赖 Qlib 生成的 all.txt，因此必须在 run_qlib_dump_bin() 之后调用！
     """
-    logging.info("--> 正在生成各板块股票池 (zb.txt, cyb.txt, kcb.txt, bjs.txt)...")
+    logging.info("--> [步骤 4/4] 正在基于 all.txt 生成各板块股票池 (zb.txt, cyb.txt, kcb.txt, bjs.txt)...")
 
+    # 配置路径
     basic_file = os.path.join(DATA_ROOT, "meta", "stock_basic.parquet")
-    cal_file = os.path.join(QLIB_DIR, "calendars", "day.txt")
     instruments_dir = os.path.join(QLIB_DIR, "instruments")
+    all_txt_path = os.path.join(instruments_dir, "all.txt")
+
     os.makedirs(instruments_dir, exist_ok=True)
 
-    if not os.path.exists(basic_file) or not os.path.exists(cal_file):
-        logging.warning("缺少 stock_basic.parquet 或交易日历，跳过板块股票池生成")
+    if not os.path.exists(basic_file):
+        logging.warning("缺少 stock_basic.parquet，跳过板块股票池生成")
+        return
+    if not os.path.exists(all_txt_path):
+        logging.warning("缺少 all.txt (可能 dump_bin 未成功)，跳过板块股票池生成")
         return
 
-    # 读取日历最新日期（作为当前在市股票的结束日期）
-    with open(cal_file, "r", encoding="utf-8") as f:
-        latest_date = [line.strip() for line in f if line.strip()][-1]
+    # 1. 读取股票基础元数据
+    df_market = pd.read_parquet(basic_file, columns=["ts_code", "market"])
+    df_market["instrument"] = df_market["ts_code"].apply(to_qlib_symbol)
+    df_market = df_market.drop(columns=["ts_code"])
 
-    df_basic = pd.read_parquet(basic_file)
-    if df_basic.empty:
-        return
+    # 2. 读取 dump_bin 生成的 all.txt
+    df_all = pd.read_csv(
+        all_txt_path,
+        sep="\t",
+        header=None,
+        names=["instrument", "start_date", "end_date"],
+    )
 
+    # 3. 横向合并打上 market 标签
+    df_all_market = df_all.merge(df_market, on="instrument", how="left").dropna(subset=["market"])
+
+    # 4. 分板块输出
     for market_name, out_filename in SECTOR_INSTRUMENT_MAP.items():
-        # 筛选对应板块的股票
-        df_sub = df_basic[df_basic["market"] == market_name].copy()
-        if df_sub.empty:
+        # 筛选特定市场的股票
+        df_filtered = df_all_market[df_all_market["market"] == market_name].copy()
+
+        if df_filtered.empty:
+            logging.warning("跳过: %s (无数据)", market_name)
             continue
 
-        records = []
-        for _, row in df_sub.iterrows():
-            symbol = to_qlib_symbol(row["ts_code"])
+        # 写入 txt 文件
+        output_txt = os.path.join(instruments_dir, out_filename)
+        with open(output_txt, "w", encoding="utf-8") as f:
+            for _, row in df_filtered.iterrows():
+                f.write(f"{row['instrument']}\t{row['start_date']}\t{row['end_date']}\n")
 
-            # 上市日期格式化: YYYYMMDD -> YYYY-MM-DD
-            list_d = str(row["list_date"])
-            if len(list_d) == 8:
-                start_date = f"{list_d[:4]}-{list_d[4:6]}-{list_d[6:]}"
-            else:
-                continue
-
-            # 退市日期处理 (若未退市则取最新交易日)
-            delist_d = str(row.get("delist_date", ""))
-            if len(delist_d) == 8:
-                end_date = f"{delist_d[:4]}-{delist_d[4:6]}-{delist_d[6:]}"
-            else:
-                end_date = latest_date
-
-            records.append(f"{symbol}\t{start_date}\t{end_date}\n")
-
-        # 写入 instruments/{name}.txt
-        target_path = os.path.join(instruments_dir, out_filename)
-        with open(target_path, "w", encoding="utf-8") as f:
-            f.writelines(sorted(records))
-
-        logging.info("  已生成 %s 板块股票池 -> %s (共 %d 只股票)", market_name, out_filename, len(records))
+        logging.info("  已生成 %s 板块股票池 -> %s (共 %d 只股票)", market_name, out_filename, len(df_filtered))
 
     logging.info("✅ 板块股票池生成完毕！")
 
@@ -441,7 +436,7 @@ def main(clean_temp_csv: bool = True):
     # build_index_instruments()
 
     # # 4. 构建板块股票池 (主板 zb, 创业板 cyb, 科创板 kcb, 北交所 bjs)
-    # build_market_sector_instruments()
+    build_market_sector_instruments()
 
     # # 5. 清理临时 CSV 文件
     # if clean_temp_csv and os.path.exists(TEMP_CSV_DIR):
