@@ -57,6 +57,7 @@ SLEEP_SECONDS = 0.15
 MAX_RETRY = 3
 
 # 纳入监控与下载的核心宽基/大盘指数列表
+# 指数权重关注列表
 CORE_INDICES = [
     "000001.SH",  # 上证指数
     "399001.SZ",  # 深证成指
@@ -69,29 +70,6 @@ CORE_INDICES = [
     "000852.SH",  # 中证1000
     "399303.SZ",  # 国证2000
 ]
-
-# 指数权重关注列表
-WEIGHT_INDICES = [
-    "399006.SZ",  # 创业板指
-    "000688.SH",  # 科创50
-    "000016.SH",  # 上证50
-    "000300.SH",  # 沪深300
-    "000905.SH",  # 中证500
-    "000906.SH",  # 中证800
-    "000852.SH",  # 中证1000
-]
-
-# 常见核心指数的最早数据年份兜底（避免从 2000 年开始无谓地遍历几百次空请求）
-INDEX_MIN_START = {
-    "399006.SZ": "20100601",  # 创业板指 (2010年发布)
-    "000688.SH": "20200701",  # 科创50 (2020年发布)
-    "000016.SH": "20040101",  # 上证50 (2004年发布)
-    "000300.SH": "20050101",  # 沪深300 (2005年发布)
-    "000905.SH": "20050101",  # 中证500 (2005年发布)
-    "000906.SH": "20050101",  # 中证800 (2005年发布)
-    "000852.SH": "20141001",  # 中证1000 (2014年发布)
-}
-
 
 # ==============================================================================
 
@@ -353,77 +331,55 @@ def sync_one_day_index(pro, trade_date: str) -> bool:
 
 def sync_index_weights(pro, start_date: str, end_date: str):
     """
-    增量同步核心宽基指数的历史成分股权重
+    全量同步核心宽基指数的历史成分股权重
     """
     logging.info("--> 正在同步核心指数成分与历史权重...")
     os.makedirs(DIR_INDEX_WEIGHT, exist_ok=True)
 
-    for index_code in WEIGHT_INDICES:
-        file_path = os.path.join(DIR_INDEX_WEIGHT, f"{index_code}.parquet")
-        local_max = None
+    for index_code in CORE_INDICES:
+        logging.info("同步指数权重: %s [%s ~ %s]", index_code, start_date, end_date)
 
-        if os.path.exists(file_path):
-            try:
-                old_df = pd.read_parquet(file_path, columns=["trade_date"])
-                if not old_df.empty:
-                    local_max = str(old_df["trade_date"].max())
-            except Exception as e:
-                logging.warning("读取本地指数权重失败 %s: %s", index_code, e)
-
-        # 结合指数实际发布日期确定需要补齐的时间段，防止从 2000 年发起几百次无效空请求触发频控
-        min_valid_start = INDEX_MIN_START.get(index_code, start_date)
-        req_start = max(start_date, min_valid_start)
-
-        if local_max and local_max >= req_start:
-            req_start = local_max
-
-        if req_start > end_date:
-            continue
-
-        logging.info("同步指数权重: %s [%s ~ %s]", index_code, req_start, end_date)
-
-        # ==================== 按月生成切片 ====================
-        # 使用 pandas 生成从 req_start 到 end_date 的所有自然月区间
-        month_periods = pd.period_range(start=pd.to_datetime(req_start), end=pd.to_datetime(end_date), freq="M")
-
+        # ==================== 滚动翻页 ====================
+        # 由于 index_weight 单次调用有返回条数上限，无法一次取全区间数据；
+        # 且 Tushare 返回的数据是从最新到最旧排列。
+        # 策略: 固定 start_date 不动，每次取回本批数据中最旧的 trade_date，
+        #       将其作为下一批的 end_date 继续往回请求，直到取不到更旧的数据为止。
         frames = []
-        for p in month_periods:
-            m_start = p.start_time.strftime("%Y%m%d")
-            m_end = p.end_time.strftime("%Y%m%d")
-
-            # 对首尾两个月做精确日期边界截断
-            if m_start < req_start:
-                m_start = req_start
-            if m_end > end_date:
-                m_end = end_date
-
-            df_month = _retry(
-                lambda s=m_start, e=m_end: pro.index_weight(
+        cur_end = end_date
+        while cur_end >= start_date:
+            df_page = _retry(
+                lambda e=cur_end: pro.index_weight(
                     index_code=index_code,
-                    start_date=s,
+                    start_date=start_date,
                     end_date=e,
                     fields="index_code,con_code,trade_date,weight",
                 ),
-                desc=f"获取指数权重 {index_code} ({p})",
+                desc=f"获取指数权重 {index_code} (<= {cur_end})",
             )
 
-            if df_month is not None and not df_month.empty:
-                frames.append(df_month)
+            if df_page is None or df_page.empty:
+                break
 
+            frames.append(df_page)
+
+            # 本批返回的最旧交易日，作为下一批的 end_date
+            page_min = str(df_page["trade_date"].min())
+
+            # 日期未再往回推说明本批数据都落在同一天(已到最旧或到达 req_start)，退出以避免死循环
+            if page_min >= cur_end:
+                break
+
+            cur_end = page_min
             time.sleep(SLEEP_SECONDS * 2)
         # =============================================================
 
         if frames:
-            df_new = pd.concat(frames, ignore_index=True)
-            if os.path.exists(file_path):
-                old_df = pd.read_parquet(file_path)
-                df_all = pd.concat([old_df, df_new], ignore_index=True)
-            else:
-                df_all = df_new
-
+            df_all = pd.concat(frames, ignore_index=True)
             # 确保 trade_date 为统一字符串类型后去重排序
             df_all["trade_date"] = df_all["trade_date"].astype(str)
             df_all = df_all.drop_duplicates(subset=["index_code", "con_code", "trade_date"]).sort_values(["trade_date", "con_code"]).reset_index(drop=True)
+            
+            file_path = os.path.join(DIR_INDEX_WEIGHT, f"{index_code}.parquet")
             atomic_save_parquet(df_all, file_path)
 
 
