@@ -32,23 +32,23 @@ except ImportError:
 #                                  配置区
 # ==============================================================================
 # 数据仓库源根目录
-DATA_ROOT = os.path.expanduser(os.getenv("DATA_ROOT", "stock_data_warehouse_old"))
+DATA_ROOT = os.path.expanduser(os.getenv("DATA_ROOT", "~/.qlib/qlib_data/stock_data_warehouse"))
 
-# 目标 Qlib 数据目录 (默认存储在 ~/.qlib/qlib_data/cn_data)
-QLIB_DIR = os.path.expanduser(os.getenv("QLIB_DIR", "~/.qlib/qlib_data/my_tushare_data_new"))
+# 目标 Qlib 数据目录 (默认存储在 ~/.qlib/qlib_data/my_tushare_data)
+QLIB_DIR = os.path.expanduser(os.getenv("QLIB_DIR", "~/.qlib/qlib_data/my_tushare_data"))
 
 # 临时重组 CSV 目录 (转换后可自动清理)
 TEMP_CSV_DIR = os.path.join(DATA_ROOT, "temp_csv_for_qlib")
 
 # 包含的基础行情与基本面字段 (导出到 Qlib)
-# 基础行情必须包含: open, close, high, low, volume, money, factor
+# 基础行情必须包含: open, close, high, low, volume, amount, factor
 STOCK_FIELDS = [
     "open",
     "high",
     "low",
     "close",
     "volume",
-    "money",
+    "amount",
     "factor",
     "vwap",
     "turnover_rate",
@@ -111,7 +111,7 @@ def to_qlib_symbol(ts_code: str) -> str:
 
 def export_parquet_to_symbol_csv():
     """使用 DuckDB 扫描全量日截面 Parquet，按 symbol 分区极速导出为单文件 CSV"""
-    logging.info("--> [步骤 1/3] 使用 DuckDB 极速重组日截面数据为单标的 CSV...")
+    logging.info("--> [步骤 1/2] 使用 DuckDB 极速重组日截面数据为单标的 CSV...")
 
     if os.path.exists(TEMP_CSV_DIR):
         shutil.rmtree(TEMP_CSV_DIR)
@@ -137,7 +137,7 @@ def export_parquet_to_symbol_csv():
                     
                     -- 量纲换算: 手 -> 股, 千元 -> 元
                     COALESCE(vol * 100, 0.0) AS volume,
-                    COALESCE(amount * 1000, 0.0) AS money,
+                    COALESCE(amount * 1000, 0.0) AS amount,
                     COALESCE(adj_factor, 1.0) AS factor,
                     
                     -- 后复权 VWAP (成交均价 * factor)
@@ -157,66 +157,66 @@ def export_parquet_to_symbol_csv():
         """
         con.execute(query_stock)
 
-    # 2. 导出核心指数数据 (指数点位天然连续，factor 统一设为 1.0)
-    index_dir = os.path.join(DATA_ROOT, "index", "daily").replace("\\", "/")
-    if os.path.exists(os.path.join(DATA_ROOT, "index", "daily")):
-        logging.info("  正在处理核心指数数据...")
-        query_index = f"""
-            COPY (
-                SELECT 
-                    strftime(strptime(trade_date::VARCHAR, '%Y%m%d'), '%Y-%m-%d') AS date,
-                    regexp_replace(ts_code, '^([0-9]+)\.([A-Za-z]+)$', '\\2\\1') AS symbol,
-                    open, high, low, close,
-                    COALESCE(vol * 100, 0.0) AS volume,
-                    COALESCE(amount * 1000, 0.0) AS money,
-                    1.0 AS factor,
-                    CASE WHEN vol > 0 THEN (amount * 1000) / (vol * 100) ELSE close END AS vwap,
-                    turnover_rate, turnover_rate_f, pe, pe_ttm, pb, NULL AS ps, NULL AS ps_ttm,
-                    dv_ratio, dv_ttm, total_mv, float_mv AS circ_mv
-                FROM '{index_dir}/*.parquet'
-                WHERE ts_code IS NOT NULL
-                ORDER BY symbol, date ASC
-            ) TO '{TEMP_CSV_DIR}' (
-                FORMAT CSV, HEADER TRUE, PARTITION_BY (symbol), OVERWRITE_OR_IGNORE TRUE
-            );
-        """
-        con.execute(query_index)
+    # # 2. 导出核心指数数据 (指数点位天然连续，factor 统一设为 1.0)
+    # index_dir = os.path.join(DATA_ROOT, "index", "daily").replace("\\", "/")
+    # if os.path.exists(os.path.join(DATA_ROOT, "index", "daily")):
+    #     logging.info("  正在处理核心指数数据...")
+    #     query_index = f"""
+    #         COPY (
+    #             SELECT 
+    #                 strftime(strptime(trade_date::VARCHAR, '%Y%m%d'), '%Y-%m-%d') AS date,
+    #                 regexp_replace(ts_code, '^([0-9]+)\.([A-Za-z]+)$', '\\2\\1') AS symbol,
+    #                 open, high, low, close,
+    #                 COALESCE(vol * 100, 0.0) AS volume,
+    #                 COALESCE(amount * 1000, 0.0) AS amount,
+    #                 1.0 AS factor,
+    #                 CASE WHEN vol > 0 THEN (amount * 1000) / (vol * 100) ELSE close END AS vwap,
+    #                 turnover_rate, turnover_rate_f, pe, pe_ttm, pb, NULL AS ps, NULL AS ps_ttm,
+    #                 dv_ratio, dv_ttm, total_mv, float_mv AS circ_mv
+    #             FROM '{index_dir}/*.parquet'
+    #             WHERE ts_code IS NOT NULL
+    #             ORDER BY symbol, date ASC
+    #         ) TO '{TEMP_CSV_DIR}' (
+    #             FORMAT CSV, HEADER TRUE, PARTITION_BY (symbol), OVERWRITE_OR_IGNORE TRUE
+    #         );
+    #     """
+    #     con.execute(query_index)
 
-    # 3. 导出 ETF 场内基金数据
-    fund_dir = os.path.join(DATA_ROOT, "fund", "daily").replace("\\", "/")
-    if os.path.exists(os.path.join(DATA_ROOT, "fund", "daily")):
-        logging.info("  正在处理 ETF 场内基金数据...")
-        query_fund = f"""
-            COPY (
-                SELECT 
-                    strftime(strptime(trade_date::VARCHAR, '%Y%m%d'), '%Y-%m-%d') AS date,
-                    regexp_replace(ts_code, '^([0-9]+)\.([A-Za-z]+)$', '\\2\\1') AS symbol,
+    # # 3. 导出 ETF 场内基金数据
+    # fund_dir = os.path.join(DATA_ROOT, "fund", "daily").replace("\\", "/")
+    # if os.path.exists(os.path.join(DATA_ROOT, "fund", "daily")):
+    #     logging.info("  正在处理 ETF 场内基金数据...")
+    #     query_fund = f"""
+    #         COPY (
+    #             SELECT 
+    #                 strftime(strptime(trade_date::VARCHAR, '%Y%m%d'), '%Y-%m-%d') AS date,
+    #                 regexp_replace(ts_code, '^([0-9]+)\.([A-Za-z]+)$', '\\2\\1') AS symbol,
                     
-                    -- ETF 后复权价格 (Raw * Factor)
-                    ROUND(open * COALESCE(adj_factor, 1.0), 4) AS open,
-                    ROUND(high * COALESCE(adj_factor, 1.0), 4) AS high,
-                    ROUND(low * COALESCE(adj_factor, 1.0), 4) AS low,
-                    ROUND(close * COALESCE(adj_factor, 1.0), 4) AS close,
+    #                 -- ETF 后复权价格 (Raw * Factor)
+    #                 ROUND(open * COALESCE(adj_factor, 1.0), 4) AS open,
+    #                 ROUND(high * COALESCE(adj_factor, 1.0), 4) AS high,
+    #                 ROUND(low * COALESCE(adj_factor, 1.0), 4) AS low,
+    #                 ROUND(close * COALESCE(adj_factor, 1.0), 4) AS close,
                     
-                    COALESCE(vol * 100, 0.0) AS volume,
-                    COALESCE(amount * 1000, 0.0) AS money,
-                    COALESCE(adj_factor, 1.0) AS factor,
+    #                 COALESCE(vol * 100, 0.0) AS volume,
+    #                 COALESCE(amount * 1000, 0.0) AS amount,
+    #                 COALESCE(adj_factor, 1.0) AS factor,
                     
-                    CASE 
-                        WHEN vol > 0 THEN ROUND(((amount * 1000) / (vol * 100)) * COALESCE(adj_factor, 1.0), 4)
-                        ELSE ROUND(close * COALESCE(adj_factor, 1.0), 4)
-                    END AS vwap,
+    #                 CASE 
+    #                     WHEN vol > 0 THEN ROUND(((amount * 1000) / (vol * 100)) * COALESCE(adj_factor, 1.0), 4)
+    #                     ELSE ROUND(close * COALESCE(adj_factor, 1.0), 4)
+    #                 END AS vwap,
                     
-                    NULL AS turnover_rate, NULL AS turnover_rate_f, NULL AS pe, NULL AS pe_ttm, NULL AS pb, NULL AS ps, NULL AS ps_ttm,
-                    NULL AS dv_ratio, NULL AS dv_ttm, total_netasset AS total_mv, net_asset AS circ_mv
-                FROM '{fund_dir}/*.parquet'
-                WHERE ts_code IS NOT NULL
-                ORDER BY symbol, date ASC
-            ) TO '{TEMP_CSV_DIR}' (
-                FORMAT CSV, HEADER TRUE, PARTITION_BY (symbol), OVERWRITE_OR_IGNORE TRUE
-            );
-        """
-        con.execute(query_fund)
+    #                 NULL AS turnover_rate, NULL AS turnover_rate_f, NULL AS pe, NULL AS pe_ttm, NULL AS pb, NULL AS ps, NULL AS ps_ttm,
+    #                 NULL AS dv_ratio, NULL AS dv_ttm, total_netasset AS total_mv, net_asset AS circ_mv
+    #             FROM '{fund_dir}/*.parquet'
+    #             WHERE ts_code IS NOT NULL
+    #             ORDER BY symbol, date ASC
+    #         ) TO '{TEMP_CSV_DIR}' (
+    #             FORMAT CSV, HEADER TRUE, PARTITION_BY (symbol), OVERWRITE_OR_IGNORE TRUE
+    #         );
+    #     """
+    #     con.execute(query_fund)
 
     # 4. 扁平化 DuckDB 分区文件夹结构为 {symbol}.csv
     logging.info("  正在整理临时 CSV 文件名...")
@@ -229,6 +229,7 @@ def export_parquet_to_symbol_csv():
                     target_file = os.path.join(TEMP_CSV_DIR, f"{symbol}.csv")
                     shutil.move(os.path.join(root, file), target_file)
 
+    # 清空 DuckDB 生成的分区文件夹 (保留 CSV 文件)
     for d in os.listdir(TEMP_CSV_DIR):
         dir_path = os.path.join(TEMP_CSV_DIR, d)
         if os.path.isdir(dir_path):
@@ -245,15 +246,15 @@ def export_parquet_to_symbol_csv():
 
 def run_qlib_dump_bin():
     """调用 Qlib 官方 dump_bin 模块生成高性能 .bin 二进制文件"""
-    logging.info("--> [步骤 2/3] 调用 Qlib dump_bin 编译生成二进制矩阵 (features/*.bin)...")
+    logging.info("--> [步骤 2/2] 调用 Qlib dump_bin 编译生成二进制矩阵 (features/*.bin)...")
 
     include_fields_str = ",".join(STOCK_FIELDS)
     cmd = [
         sys.executable,
         "-m",
-        "qlib.dump_bin",
+        "scripts.dump_bin",
         "dump_all",
-        "--csv_path",
+        "--data_path",
         TEMP_CSV_DIR,
         "--qlib_dir",
         QLIB_DIR,
@@ -436,16 +437,16 @@ def main(clean_temp_csv: bool = True):
     # 2. 编译为 Qlib 二进制
     run_qlib_dump_bin()
 
-    # 3. 构建动态指数股票池
-    build_index_instruments()
+    # # 3. 构建动态指数股票池
+    # build_index_instruments()
 
-    # 4. 构建板块股票池 (主板 zb, 创业板 cyb, 科创板 kcb, 北交所 bjs)
-    build_market_sector_instruments()
+    # # 4. 构建板块股票池 (主板 zb, 创业板 cyb, 科创板 kcb, 北交所 bjs)
+    # build_market_sector_instruments()
 
-    # 5. 清理临时 CSV 文件
-    if clean_temp_csv and os.path.exists(TEMP_CSV_DIR):
-        logging.info("--> 正在清理临时 CSV 文件夹...")
-        shutil.rmtree(TEMP_CSV_DIR)
+    # # 5. 清理临时 CSV 文件
+    # if clean_temp_csv and os.path.exists(TEMP_CSV_DIR):
+    #     logging.info("--> 正在清理临时 CSV 文件夹...")
+    #     shutil.rmtree(TEMP_CSV_DIR)
 
     logging.info("=" * 60)
     logging.info("🎉 全流程构建完成！可以直接在 Qlib 中无缝初始化并读取数据。")
@@ -454,4 +455,4 @@ def main(clean_temp_csv: bool = True):
 
 if __name__ == "__main__":
     # clean_temp_csv=True 会在生成二进制后自动删除中间 CSV，节省磁盘空间
-    main(clean_temp_csv=True)
+    main(clean_temp_csv=False)
