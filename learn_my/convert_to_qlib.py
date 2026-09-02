@@ -66,6 +66,8 @@ STOCK_FIELDS = [
 
 # 指数权重到 Qlib 股票池的映射配置 (代码 -> 文件名)
 INDEX_INSTRUMENT_MAP = {
+    "000001.SH": "shcomp.txt",  # 上证指数
+    "399001.SZ": "szcomp.txt",  # 深证成指
     "399006.SZ": "chinext.txt",  # 创业板指
     "000688.SH": "star50.txt",  # 科创50
     "000016.SH": "csi50.txt",  # 上证50
@@ -73,6 +75,7 @@ INDEX_INSTRUMENT_MAP = {
     "000905.SH": "csi500.txt",  # 中证500
     "000906.SH": "csi800.txt",  # 中证800
     "000852.SH": "csi1000.txt",  # 中证1000
+    "399303.SZ": "cni2000.txt",  # 国证2000
 }
 
 SECTOR_INSTRUMENT_MAP = {
@@ -280,12 +283,79 @@ def run_qlib_dump_bin():
 # ==============================================================================
 
 
+def convert_index_weight_to_qlib_format(input_parquet, output_txt):
+    """
+    按截面日期比对的“状态机”算法转换指数权重
+    """
+    df = pd.read_parquet(input_parquet)
+    if df.empty:
+        logging.warning("跳过: %s (无数据)", input_parquet)
+        return
+
+    # 格式化数据
+    df["symbol"] = df["con_code"].apply(to_qlib_symbol)
+    df["date"] = pd.to_datetime(df["trade_date"].astype(str)).dt.strftime("%Y-%m-%d")
+
+    MIN_DATE = "2000-01-01"
+    MAX_DATE = "2099-12-31"
+
+    # 获取所有升序排列的调仓日
+    all_dates = sorted(df["date"].unique())
+
+    active_stocks = {}  # 记录当前在指数中的股票及其起始时间 {symbol: start_date}
+    results = []  # 存放最终的区间结果
+
+    # 按照调仓日期，一天一天往后看
+    for i, current_date in enumerate(all_dates):
+        # 获取当前调仓日的所有股票集合
+        current_stocks = set(df[df["date"] == current_date]["symbol"])
+
+        if i == 0:
+            # 第一期特例：强制把起始时间拉长到极小值 MIN_DATE
+            for sym in current_stocks:
+                active_stocks[sym] = MIN_DATE
+        else:
+            # 1. 寻找被剔除的股票 (在上期的 active 字典里，但不在本次 current_stocks 里)
+            removed_stocks = set(active_stocks.keys()) - current_stocks
+
+            # 剔除的截止时间：当前调仓日的“上一天”
+            end_date = (pd.to_datetime(current_date, format="%Y-%m-%d") - pd.Timedelta(1, unit="D")).strftime("%Y-%m-%d")
+
+            for sym in removed_stocks:
+                # 记录这段区间并归档
+                results.append({"code": sym, "start": active_stocks[sym], "end": end_date})
+                # 从监控池中移除
+                del active_stocks[sym]
+
+            # 2. 寻找新加入的股票 (在本次 current_stocks 里，但不在上期 active 字典里)
+            added_stocks = current_stocks - set(active_stocks.keys())
+            for sym in added_stocks:
+                # 记录新的起始时间为当前调仓日
+                active_stocks[sym] = current_date
+
+    # 循环结束后，所有还留在 active_stocks 里的股票，说明至今仍在指数内
+    # 强制把结束时间拉长到极大值 MAX_DATE
+    for sym, start_date in active_stocks.items():
+        results.append({"code": sym, "start": start_date, "end": MAX_DATE})
+
+    # 转为 DataFrame 并排序输出
+    result_df = pd.DataFrame(results).sort_values(["code", "start"])
+
+    # 写入 TXT
+    os.makedirs(os.path.dirname(output_txt), exist_ok=True)
+    with open(output_txt, "w", encoding="utf-8") as f:
+        for _, row in result_df.iterrows():
+            f.write(f"{row['code']}\t{row['start']}\t{row['end']}\n")
+
+    logging.info("    转换完成! 共生成 %d 个持有区间 -> %s", len(result_df), output_txt)
+
+
 def build_index_instruments():
     """
     根据 index/weight/ 目录下的历史权重，生成 Qlib 标准的成分股区间池
     格式: <symbol>\t<start_date>\t<end_date>
     """
-    logging.info("--> [步骤 3/3] 正在根据历史权重生成 Qlib 成分股池 (instruments/*.txt)...")
+    logging.info("--> [步骤 3/4] 正在根据历史权重生成 Qlib 成分股池 (instruments/*.txt)...")
 
     weight_dir = os.path.join(DATA_ROOT, "index", "weight")
     instruments_dir = os.path.join(QLIB_DIR, "instruments")
@@ -295,59 +365,16 @@ def build_index_instruments():
         logging.warning("未找到 %s 目录，跳过成分股池生成", weight_dir)
         return
 
-    # 读取 Qlib 已生成的全市场交易日历
-    cal_file = os.path.join(QLIB_DIR, "calendars", "day.txt")
-    if not os.path.exists(cal_file):
-        logging.warning("未找到交易日历 %s，跳过成分股池生成", cal_file)
-        return
-
-    with open(cal_file, "r", encoding="utf-8") as f:
-        all_trading_days = sorted([line.strip() for line in f if line.strip()])
-
     for index_code, out_filename in INDEX_INSTRUMENT_MAP.items():
         weight_file = os.path.join(weight_dir, f"{index_code}.parquet")
         if not os.path.exists(weight_file):
             continue
 
         logging.info("  正在构建 %s 的成份股池 -> %s...", index_code, out_filename)
-        df_weight = pd.read_parquet(weight_file)
-        if df_weight.empty:
-            continue
-
-        # 格式化日期与代码
-        df_weight["trade_date"] = pd.to_datetime(df_weight["trade_date"].astype(str)).dt.strftime("%Y-%m-%d")
-        df_weight["symbol"] = df_weight["con_code"].apply(to_qlib_symbol)
-
-        # 获取所有调仓点
-        weight_dates = sorted(df_weight["trade_date"].unique())
-
-        # 计算每个成份股在指数内的生效起止时间区间
-        records = []
-        for symbol, gp in df_weight.groupby("symbol"):
-            in_dates = set(gp["trade_date"].unique())
-            # 找到连续持有的区间
-            start_d = None
-            last_d = None
-
-            for d in weight_dates:
-                if d in in_dates:
-                    if start_d is None:
-                        start_d = d
-                    last_d = d
-                else:
-                    if start_d is not None:
-                        # 确定该段的结束时间 (下一期调仓日的前一天)
-                        records.append(f"{symbol}\t{start_d}\t{last_d}\n")
-                        start_d = None
-                        last_d = None
-            if start_d is not None:
-                # 至今仍然在成分股内，结束日期设为最后一个交易日
-                records.append(f"{symbol}\t{start_d}\t{all_trading_days[-1]}\n")
 
         # 写入 instruments/{name}.txt
         target_path = os.path.join(instruments_dir, out_filename)
-        with open(target_path, "w", encoding="utf-8") as f:
-            f.writelines(sorted(records))
+        convert_index_weight_to_qlib_format(weight_file, target_path)
 
     logging.info("✅ 股票池 instruments 生成完毕！")
 
@@ -433,7 +460,7 @@ def main(clean_temp_csv: bool = True):
     run_qlib_dump_bin()
 
     # # 3. 构建动态指数股票池
-    # build_index_instruments()
+    build_index_instruments()
 
     # # 4. 构建板块股票池 (主板 zb, 创业板 cyb, 科创板 kcb, 北交所 bjs)
     build_market_sector_instruments()
