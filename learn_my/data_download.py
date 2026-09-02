@@ -42,7 +42,7 @@ START_DATE = os.getenv("START_DATE", "20000101")
 END_DATE = os.getenv("END_DATE", None)
 
 # 数据仓库根目录
-DATA_ROOT = os.getenv("DATA_ROOT", "stock_data_warehouse")
+DATA_ROOT = os.path.expanduser(os.getenv("DATA_ROOT", "~/.qlib/qlib_data/stock_data_warehouse"))
 
 # 目录规划
 DIR_META = os.path.join(DATA_ROOT, "meta")
@@ -378,7 +378,7 @@ def sync_index_weights(pro, start_date: str, end_date: str):
             # 确保 trade_date 为统一字符串类型后去重排序
             df_all["trade_date"] = df_all["trade_date"].astype(str)
             df_all = df_all.drop_duplicates(subset=["index_code", "con_code", "trade_date"]).sort_values(["trade_date", "con_code"]).reset_index(drop=True)
-            
+
             file_path = os.path.join(DIR_INDEX_WEIGHT, f"{index_code}.parquet")
             atomic_save_parquet(df_all, file_path)
 
