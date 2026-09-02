@@ -79,8 +79,8 @@ def convert_index_weight_to_qlib_format(index_weight_dir, qlib_instruments_dir):
         '000905.SH': 'csi500',     # 中证500
         '000906.SH': 'csi800',     # 中证800
         '000852.SH': 'csi1000',    # 中证1000
-        # '932000.TI': 'csi2000',    # 中证2000
         '000688.SH': 'star50',     # 科创50
+        "399006.SZ": "chinext",    # 创业板指
     }
     
     os.makedirs(qlib_instruments_dir, exist_ok=True)
