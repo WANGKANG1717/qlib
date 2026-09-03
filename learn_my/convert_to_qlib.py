@@ -142,7 +142,7 @@ def export_parquet_to_symbol_csv():
 
         # 3. 编码 industry: 文本转递增整数 (如: 银行=1, 电子=2)
         df_meta["industry"] = df_meta["industry"].fillna("未知")
-        unique_industries =  sorted(df_meta["industry"].unique())
+        unique_industries = sorted(df_meta["industry"].unique())
         ind_map = {name: i + 1 for i, name in enumerate(unique_industries)}
         df_meta["industry_code"] = df_meta["industry"].map(ind_map).astype(int)
 
@@ -206,36 +206,36 @@ def export_parquet_to_symbol_csv():
         """
         con.execute(query_stock)
 
-    # # 2. 导出核心指数数据 (指数点位天然连续，factor 统一设为 1.0)
-    # index_dir = os.path.join(DATA_ROOT, "index", "daily").replace("\\", "/")
-    # if os.path.exists(os.path.join(DATA_ROOT, "index", "daily")):
-    #     logging.info("  正在处理核心指数数据...")
-    #     query_index = f"""
-    #         COPY (
-    #             SELECT
-    #                 strftime(strptime(trade_date::VARCHAR, '%Y%m%d'), '%Y-%m-%d') AS date,
-    #                 regexp_replace(ts_code, '^([0-9]+)\.([A-Za-z]+)$', '\\2\\1') AS symbol,
-    #                 open, high, low, close,
-    #                 COALESCE(vol * 100, 0.0) AS volume,
-    #                 COALESCE(amount * 1000, 0.0) AS amount,
-    #                 1.0 AS factor,
-    #                 CASE WHEN vol > 0 THEN (amount * 1000) / (vol * 100) ELSE close END AS vwap,
-    #                 turnover_rate, turnover_rate_f, pe, pe_ttm, pb, NULL AS ps, NULL AS ps_ttm,
-    #                 dv_ratio, dv_ttm, total_mv, float_mv AS circ_mv,
-
-    #                 -- 指数无此概念，统一补 0
-    #                 0 AS industry,
-    #                 0 AS is_ST,
-    #                 0 AS list_status
-
-    #             FROM '{index_dir}/*.parquet'
-    #             WHERE ts_code IS NOT NULL
-    #             ORDER BY symbol, date ASC
-    #         ) TO '{TEMP_CSV_DIR}' (
-    #             FORMAT CSV, HEADER TRUE, PARTITION_BY (symbol), OVERWRITE_OR_IGNORE TRUE
-    #         );
-    #     """
-    #     con.execute(query_index)
+    # 2. 导出核心指数数据 (指数点位天然连续，factor 统一设为 1.0)
+    index_dir = os.path.join(DATA_ROOT, "index", "daily").replace("\\", "/")
+    if os.path.exists(os.path.join(DATA_ROOT, "index", "daily")):
+        logging.info("  正在处理核心指数数据...")
+        query_index = f"""
+            COPY (
+                SELECT
+                    strftime(strptime(trade_date::VARCHAR, '%Y%m%d'), '%Y-%m-%d') AS date,
+                    regexp_replace(ts_code, '^([0-9]+)\.([A-Za-z]+)$', '\\2\\1') AS symbol,
+                    open, high, low, close,
+                    COALESCE(vol * 100, 0.0) AS volume,
+                    COALESCE(amount * 1000, 0.0) AS amount,
+                    1.0 AS factor,
+                    CASE WHEN vol > 0 THEN (amount * 1000) / (vol * 100) ELSE close END AS vwap,
+                    turnover_rate, turnover_rate_f, pe, pe_ttm, pb, 
+                    NULL AS ps, NULL AS ps_ttm,
+                    NULL AS dv_ratio, NULL AS dv_ttm, total_mv, float_mv AS circ_mv,
+                    
+                    -- 【必须对齐 STOCK_FIELDS】：指数无此类属性，统一补 0
+                    0 AS industry,
+                    0 AS is_ST,
+                    0 AS list_status
+                FROM read_parquet('{index_dir}/*.parquet', union_by_name=true)
+                WHERE ts_code IS NOT NULL
+                ORDER BY symbol, date ASC
+            ) TO '{TEMP_CSV_DIR}' (
+                FORMAT CSV, HEADER TRUE, PARTITION_BY (symbol), OVERWRITE_OR_IGNORE TRUE
+            );
+        """
+        con.execute(query_index)
 
     # # 3. 导出 ETF 场内基金数据
     # fund_dir = os.path.join(DATA_ROOT, "fund", "daily").replace("\\", "/")
