@@ -62,6 +62,10 @@ STOCK_FIELDS = [
     "dv_ttm",
     "total_mv",
     "circ_mv",
+    # 【新增字段】
+    "industry",  # 行业整型编码
+    "is_ST",  # ST 标记 (0/1)
+    "list_status",  # 上市状态 (0=L, 1=D, 2=P)
 ]
 
 # 指数权重到 Qlib 股票池的映射配置 (代码 -> 文件名)
@@ -122,37 +126,79 @@ def export_parquet_to_symbol_csv():
 
     con = duckdb.connect()
 
-    # 1. 导出股票数据 (处理量纲: vol*100 为股, amount*1000 为元, 计算 vwap)
+    # =========================================================================
+    # 【新增逻辑】：读取 stock_basic.parquet，构建静态属性映射视图
+    # =========================================================================
+    basic_file = os.path.join(DATA_ROOT, "meta", "stock_basic.parquet")
+    if os.path.exists(basic_file):
+        df_meta = pd.read_parquet(basic_file, columns=["ts_code", "name", "industry", "list_status"])
+
+        # 1. 编码 is_ST: 名称里包含 'ST' 则为 1，否则为 0
+        df_meta["is_ST"] = df_meta["name"].fillna("").str.upper().str.contains("ST").astype(int)
+
+        # 2. 编码 list_status: L=0(上市), D=1(退市), P=2(暂停)
+        status_map = {"L": 0, "D": 1, "P": 2}
+        df_meta["list_status_code"] = df_meta["list_status"].map(status_map).fillna(0).astype(int)
+
+        # 3. 编码 industry: 文本转递增整数 (如: 银行=1, 电子=2)
+        df_meta["industry"] = df_meta["industry"].fillna("未知")
+        unique_industries =  sorted(df_meta["industry"].unique())
+        ind_map = {name: i + 1 for i, name in enumerate(unique_industries)}
+        df_meta["industry_code"] = df_meta["industry"].map(ind_map).astype(int)
+
+        # 将处理好的元数据注册进 DuckDB 内存视图中
+        meta_view = df_meta[["ts_code", "is_ST", "list_status_code", "industry_code"]]
+        con.register("meta_view", meta_view)
+
+        # 把行业对照表存下来，方便查数字对应哪个行业
+        import json
+
+        with open(os.path.join(DATA_ROOT, "meta", "industry_mapping.json"), "w", encoding="utf-8") as f:
+            json.dump(ind_map, f, ensure_ascii=False, indent=4)
+    else:
+        # 兜底：如果没有 basic 文件，建一个空表防报错
+        meta_view = pd.DataFrame(columns=["ts_code", "is_ST", "list_status_code", "industry_code"])
+        con.register("meta_view", meta_view)
+    # =========================================================================
+
+    # 1. 导出股票数据 (LEFT JOIN 元数据)
     stock_dir = os.path.join(DATA_ROOT, "stock", "daily").replace("\\", "/")
     if os.path.exists(os.path.join(DATA_ROOT, "stock", "daily")):
         logging.info("  正在处理 A 股股票日截面数据...")
         query_stock = f"""
             COPY (
                 SELECT 
-                    strftime(strptime(trade_date::VARCHAR, '%Y%m%d'), '%Y-%m-%d') AS date,
-                    regexp_replace(ts_code, '^([0-9]+)\.([A-Za-z]+)$', '\\2\\1') AS symbol,
+                    strftime(strptime(t.trade_date::VARCHAR, '%Y%m%d'), '%Y-%m-%d') AS date,
+                    regexp_replace(t.ts_code, '^([0-9]+)\.([A-Za-z]+)$', '\\2\\1') AS symbol,
                     
                     -- 核心：转换为后复权价格 (Raw * Factor)
-                    ROUND(open * COALESCE(adj_factor, 1.0), 4) AS open,
-                    ROUND(high * COALESCE(adj_factor, 1.0), 4) AS high,
-                    ROUND(low * COALESCE(adj_factor, 1.0), 4) AS low,
-                    ROUND(close * COALESCE(adj_factor, 1.0), 4) AS close,
-                    
+                    ROUND(t.open * COALESCE(t.adj_factor, 1.0), 4) AS open,
+                    ROUND(t.high * COALESCE(t.adj_factor, 1.0), 4) AS high,
+                    ROUND(t.low * COALESCE(t.adj_factor, 1.0), 4) AS low,
+                    ROUND(t.close * COALESCE(t.adj_factor, 1.0), 4) AS close,
+                   
                     -- 量纲换算: 手 -> 股, 千元 -> 元
-                    COALESCE(vol * 100, 0.0) AS volume,
-                    COALESCE(amount * 1000, 0.0) AS amount,
-                    COALESCE(adj_factor, 1.0) AS factor,
+                    COALESCE(t.vol * 100, 0.0) AS volume,
+                    COALESCE(t.amount * 1000, 0.0) AS amount,
+                    COALESCE(t.adj_factor, 1.0) AS factor,
                     
                     -- 后复权 VWAP (成交均价 * factor)
                     CASE 
-                        WHEN vol > 0 THEN ROUND(((amount * 1000) / (vol * 100)) * COALESCE(adj_factor, 1.0), 4)
-                        ELSE ROUND(close * COALESCE(adj_factor, 1.0), 4)
+                        WHEN t.vol > 0 THEN ROUND(((t.amount * 1000) / (t.vol * 100)) * COALESCE(t.adj_factor, 1.0), 4)
+                        ELSE ROUND(t.close * COALESCE(t.adj_factor, 1.0), 4)
                     END AS vwap,
                     
-                    turnover_rate, turnover_rate_f, pe, pe_ttm, pb, ps, ps_ttm,
-                    dv_ratio, dv_ttm, total_mv, circ_mv
-                FROM '{stock_dir}/*.parquet'
-                WHERE ts_code IS NOT NULL
+                    t.turnover_rate, t.turnover_rate_f, t.pe, t.pe_ttm, t.pb, t.ps, t.ps_ttm,
+                    t.dv_ratio, t.dv_ttm, t.total_mv, t.circ_mv,
+                    
+                    -- 【新增拼接字段】
+                    COALESCE(m.industry_code, 0) AS industry,
+                    COALESCE(m.is_ST, 0) AS is_ST,
+                    COALESCE(m.list_status_code, 0) AS list_status
+                    
+                FROM '{stock_dir}/*.parquet' AS t
+                LEFT JOIN meta_view AS m ON t.ts_code = m.ts_code
+                WHERE t.ts_code IS NOT NULL
                 ORDER BY symbol, date ASC
             ) TO '{TEMP_CSV_DIR}' (
                 FORMAT CSV, HEADER TRUE, PARTITION_BY (symbol), OVERWRITE_OR_IGNORE TRUE
@@ -175,7 +221,13 @@ def export_parquet_to_symbol_csv():
     #                 1.0 AS factor,
     #                 CASE WHEN vol > 0 THEN (amount * 1000) / (vol * 100) ELSE close END AS vwap,
     #                 turnover_rate, turnover_rate_f, pe, pe_ttm, pb, NULL AS ps, NULL AS ps_ttm,
-    #                 dv_ratio, dv_ttm, total_mv, float_mv AS circ_mv
+    #                 dv_ratio, dv_ttm, total_mv, float_mv AS circ_mv,
+
+    #                 -- 指数无此概念，统一补 0
+    #                 0 AS industry,
+    #                 0 AS is_ST,
+    #                 0 AS list_status
+
     #             FROM '{index_dir}/*.parquet'
     #             WHERE ts_code IS NOT NULL
     #             ORDER BY symbol, date ASC
@@ -210,7 +262,13 @@ def export_parquet_to_symbol_csv():
     #                 END AS vwap,
 
     #                 NULL AS turnover_rate, NULL AS turnover_rate_f, NULL AS pe, NULL AS pe_ttm, NULL AS pb, NULL AS ps, NULL AS ps_ttm,
-    #                 NULL AS dv_ratio, NULL AS dv_ttm, total_netasset AS total_mv, net_asset AS circ_mv
+    #                 NULL AS dv_ratio, NULL AS dv_ttm, total_netasset AS total_mv, net_asset AS circ_mv,
+
+    #                 -- ETF 无个股行业/ST概念，统一补 0
+    #                 0 AS industry,
+    #                 0 AS is_ST,
+    #                 0 AS list_status
+
     #             FROM '{fund_dir}/*.parquet'
     #             WHERE ts_code IS NOT NULL
     #             ORDER BY symbol, date ASC
@@ -220,6 +278,8 @@ def export_parquet_to_symbol_csv():
     #     """
     #     con.execute(query_fund)
 
+    # 立即关闭 DuckDB 连接释放句柄
+    con.close()
     # 4. 扁平化 DuckDB 分区文件夹结构为 {symbol}.csv
     logging.info("  正在整理临时 CSV 文件名...")
     for root, dirs, files in os.walk(TEMP_CSV_DIR):
