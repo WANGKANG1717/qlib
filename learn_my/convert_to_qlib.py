@@ -172,24 +172,38 @@ def export_parquet_to_symbol_csv():
                     regexp_replace(t.ts_code, '^([0-9]+)\.([A-Za-z]+)$', '\\2\\1') AS symbol,
                     
                     -- 核心：转换为后复权价格 (Raw * Factor)
-                    ROUND(t.open * COALESCE(t.adj_factor, 1.0), 4) AS open,
-                    ROUND(t.high * COALESCE(t.adj_factor, 1.0), 4) AS high,
-                    ROUND(t.low * COALESCE(t.adj_factor, 1.0), 4) AS low,
-                    ROUND(t.close * COALESCE(t.adj_factor, 1.0), 4) AS close,
-                   
+                    ROUND(t.open  * t.adj_factor, 4) AS open,
+                    ROUND(t.high  * t.adj_factor, 4) AS high,
+                    ROUND(t.low   * t.adj_factor, 4) AS low,
+                    ROUND(t.close * t.adj_factor, 4) AS close,
+                
                     -- 量纲换算: 手 -> 股, 千元 -> 元
-                    COALESCE(t.vol * 100, 0.0) AS volume,
+                    COALESCE(t.vol, 0.0) * 100.0 / t.adj_factor AS volume,
                     COALESCE(t.amount * 1000, 0.0) AS amount,
-                    COALESCE(t.adj_factor, 1.0) AS factor,
+                    t.adj_factor AS factor,
                     
                     -- 后复权 VWAP (成交均价 * factor)
                     CASE 
-                        WHEN t.vol > 0 THEN ROUND(((t.amount * 1000) / (t.vol * 100)) * COALESCE(t.adj_factor, 1.0), 4)
-                        ELSE ROUND(t.close * COALESCE(t.adj_factor, 1.0), 4)
+                        WHEN t.vol > 0 AND t.amount IS NOT NULL
+                        THEN ROUND(
+                            ((t.amount * 1000.0) / (t.vol * 100.0))
+                            * t.adj_factor,
+                            4
+                        )
+                        ELSE ROUND(t.close * t.adj_factor, 4)
                     END AS vwap,
                     
-                    t.turnover_rate, t.turnover_rate_f, t.pe, t.pe_ttm, t.pb, t.ps, t.ps_ttm,
-                    t.dv_ratio, t.dv_ttm, t.total_mv, t.circ_mv,
+                    t.turnover_rate,
+                    t.turnover_rate_f,
+                    t.pe,
+                    t.pe_ttm,
+                    t.pb,
+                    t.ps,
+                    t.ps_ttm,
+                    t.dv_ratio,
+                    t.dv_ttm,
+                    t.total_mv,
+                    t.circ_mv,
                     
                     -- 【新增拼接字段】
                     COALESCE(m.industry_code, 0) AS industry,
@@ -199,6 +213,9 @@ def export_parquet_to_symbol_csv():
                 FROM '{stock_dir}/*.parquet' AS t
                 LEFT JOIN meta_view AS m ON t.ts_code = m.ts_code
                 WHERE t.ts_code IS NOT NULL
+                -- 股票复权因子缺失时不能用 1.0 代替。
+                AND t.adj_factor IS NOT NULL
+                AND t.adj_factor > 0
                 ORDER BY symbol, date ASC
             ) TO '{TEMP_CSV_DIR}' (
                 FORMAT CSV, HEADER TRUE, PARTITION_BY (symbol), OVERWRITE_OR_IGNORE TRUE
