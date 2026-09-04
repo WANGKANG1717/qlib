@@ -216,11 +216,16 @@ def sync_one_day_stock(pro, trade_date: str) -> bool:
     # 以下代码用于重新拉取数据有缺失的数据
     # required_cols = {"amount", "adj_factor", "turnover_rate_f"} # 关键字段检查，确保宽表完整性
     # if os.path.exists(out_file):
-    #     old_cols = set(pd.read_parquet(out_file, columns=None).columns)
-    #     if required_cols.issubset(old_cols):
-    #         logging.info("交易日 %s 股票日截面宽表已存在且关键字段完整，跳过", trade_date)
-    #         return True
-    #     logging.info("交易日 %s 股票日截面宽表缺失关键字段，重新拉取", trade_date)
+    #     old_data = pd.read_parquet(out_file, columns=None)
+
+    #     if set(old_data['adj_factor']) == {1.0}:
+    #         logging.info("交易日 %s 股票日截面宽表复权因子全为 1.0，重新拉取", trade_date)
+    #     else:   
+    #         old_cols = set(old_data.columns)
+    #         if required_cols.issubset(old_cols):
+    #             logging.info("交易日 %s 股票日截面宽表已存在且关键字段完整，跳过", trade_date)
+    #             return True
+    #         logging.info("交易日 %s 股票日截面宽表缺失关键字段，重新拉取", trade_date)
     # else:
     #     logging.info("交易日 %s 股票日截面宽表不存在，开始拉取", trade_date)
 
@@ -242,8 +247,8 @@ def sync_one_day_stock(pro, trade_date: str) -> bool:
     )
     time.sleep(SLEEP_SECONDS)
     # 【校验 2】：因子接口若报错，说明网络异常，直接放弃当天，不落盘！
-    if df_adj is None:
-        logging.error("交易日 %s 复权因子拉取失败，放弃本次落盘", trade_date)
+    if df_adj is None or df_adj.empty:
+        logging.error("交易日 %s 复权因子%s，放弃本次落盘", trade_date, "拉取失败" if df_adj is None else "为空")
         return False
 
     # 3. 获取每日基本面估值指标
@@ -265,8 +270,6 @@ def sync_one_day_stock(pro, trade_date: str) -> bool:
 
     if not df_adj.empty:
         merged = pd.merge(merged, df_adj[["ts_code", "adj_factor"]], on="ts_code", how="left")
-    else:
-        merged["adj_factor"] = 1.0
 
     if not df_basic.empty:
         # 剔除 daily_basic 中重复的 close 列，避免合并冲突
@@ -463,8 +466,8 @@ def sync_one_day_fund(pro, trade_date: str) -> bool:
         desc=f"ETF 复权因子 {trade_date}",
     )
     time.sleep(SLEEP_SECONDS)
-    if df_adj is None:
-        logging.error("交易日 %s ETF复权因子拉取失败，放弃本次落盘", trade_date)
+    if df_adj is None or df_adj.empty:
+        logging.error("交易日 %s ETF复权因子%s，放弃本次落盘", trade_date, "拉取失败" if df_adj is None else "为空")
         return False
 
     # 3. 获取当日净值及资产规模 (按 nav_date 匹配)
@@ -499,8 +502,6 @@ def sync_one_day_fund(pro, trade_date: str) -> bool:
     # 合并复权因子
     if not df_adj.empty:
         merged = pd.merge(merged, df_adj[["ts_code", "adj_factor"]], on="ts_code", how="left")
-    else:
-        merged["adj_factor"] = 1.0
 
     # 合并净值与资产
     if not df_nav.empty:
