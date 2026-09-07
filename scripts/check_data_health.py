@@ -36,7 +36,8 @@ class DataHealthChecker:
         self.large_step_threshold_price = large_step_threshold_price
         self.large_step_threshold_volume = large_step_threshold_volume
         self.missing_data_num = missing_data_num
-        self.qlib_dir = os.path.abspath(os.path.expanduser(qlib_dir))
+        if qlib_dir:
+            self.qlib_dir = os.path.abspath(os.path.expanduser(qlib_dir))
 
         if csv_path:
             assert os.path.isdir(csv_path), f"{csv_path} should be a directory."
