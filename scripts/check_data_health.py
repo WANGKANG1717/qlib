@@ -1,3 +1,4 @@
+import json
 import os
 from typing import Optional
 
@@ -26,6 +27,7 @@ class DataHealthChecker:
         large_step_threshold_price=0.5,
         large_step_threshold_volume=3,
         missing_data_num=0,
+        report_dir=None,
     ):
         assert csv_path or qlib_dir, "One of csv_path or qlib_dir should be provided."
         assert not (csv_path and qlib_dir), "Only one of csv_path or qlib_dir should be provided."
@@ -36,14 +38,16 @@ class DataHealthChecker:
         self.large_step_threshold_price = large_step_threshold_price
         self.large_step_threshold_volume = large_step_threshold_volume
         self.missing_data_num = missing_data_num
-        if qlib_dir:
-            self.qlib_dir = os.path.abspath(os.path.expanduser(qlib_dir))
+        self.qlib_dir = os.path.abspath(os.path.expanduser(qlib_dir)) if qlib_dir else None
+        self.report_dir = os.path.abspath(os.path.expanduser(report_dir)) if report_dir else None
 
         if csv_path:
             assert os.path.isdir(csv_path), f"{csv_path} should be a directory."
             files = [f for f in os.listdir(csv_path) if f.endswith(".csv")]
             for filename in tqdm(files, desc="Loading data"):
                 df = pd.read_csv(os.path.join(csv_path, filename))
+                if "date" in df.columns:
+                    df = df.sort_values("date").reset_index(drop=True)
                 self.data[filename] = df
 
         elif qlib_dir:
@@ -68,7 +72,7 @@ class DataHealthChecker:
                 inplace=True,
             )
             self.data[instrument] = df
-        print(df)
+        logger.info(f"Loaded {len(self.data)} instruments from Qlib.")
 
     # NOTE:
     # This check is added due to a known issue in Qlib where feature paths
@@ -108,7 +112,11 @@ class DataHealthChecker:
             return None
 
     def check_missing_data(self) -> Optional[pd.DataFrame]:
-        """Check if any data is missing in the DataFrame."""
+        """Check missing values in required OHLCV fields only.
+
+        Optional valuation/fundamental fields are allowed to be null and must not
+        make an otherwise usable market-data file fail this check.
+        """
         result_dict = {
             "instruments": [],
             "open": [],
@@ -118,14 +126,14 @@ class DataHealthChecker:
             "volume": [],
         }
         for filename, df in self.data.items():
-            missing_data_columns = df.isnull().sum()[df.isnull().sum() > self.missing_data_num].index.tolist()
-            if len(missing_data_columns) > 0:
+            missing_counts = {
+                col: int(df[col].isnull().sum()) if col in df.columns else len(df)
+                for col in ["open", "high", "low", "close", "volume"]
+            }
+            if any(count > self.missing_data_num for count in missing_counts.values()):
                 result_dict["instruments"].append(filename)
-                result_dict["open"].append(df.isnull().sum()["open"])
-                result_dict["high"].append(df.isnull().sum()["high"])
-                result_dict["low"].append(df.isnull().sum()["low"])
-                result_dict["close"].append(df.isnull().sum()["close"])
-                result_dict["volume"].append(df.isnull().sum()["volume"])
+                for col, count in missing_counts.items():
+                    result_dict[col].append(count)
 
         result_df = pd.DataFrame(result_dict).set_index("instruments")
         if not result_df.empty:
@@ -149,11 +157,16 @@ class DataHealthChecker:
                     pct_change = df[col].pct_change(fill_method=None).abs()
                     threshold = self.large_step_threshold_volume if col == "volume" else self.large_step_threshold_price
                     if pct_change.max() > threshold:
-                        large_steps = pct_change[pct_change > threshold]
+                        max_position = int(pct_change.fillna(float("-inf")).to_numpy().argmax())
+                        if "date" in df.columns:
+                            change_date = pd.to_datetime(df.iloc[max_position]["date"])
+                        else:
+                            index_value = df.index[max_position]
+                            change_date = pd.to_datetime(index_value[-1] if isinstance(index_value, tuple) else index_value)
                         result_dict["instruments"].append(filename)
                         result_dict["col_name"].append(col)
-                        result_dict["date"].append(large_steps.index.to_list()[0][1].strftime("%Y-%m-%d"))
-                        result_dict["pct_change"].append(pct_change.max())
+                        result_dict["date"].append(change_date.strftime("%Y-%m-%d"))
+                        result_dict["pct_change"].append(float(pct_change.iloc[max_position]))
                         affected_columns.append(col)
 
         result_df = pd.DataFrame(result_dict).set_index("instruments")
@@ -174,7 +187,7 @@ class DataHealthChecker:
             if not all(column in df.columns for column in required_columns):
                 missing_required_columns = [column for column in required_columns if column not in df.columns]
                 result_dict["instruments"].append(filename)
-                result_dict["missing_col"] += missing_required_columns
+                result_dict["missing_col"].append(",".join(missing_required_columns))
 
         result_df = pd.DataFrame(result_dict).set_index("instruments")
         if not result_df.empty:
@@ -183,26 +196,100 @@ class DataHealthChecker:
             logger.info(f"✅ The columns (OLHCV) are complete and not missing.")
             return None
 
+    def check_ohlc_consistency(self) -> Optional[pd.DataFrame]:
+        """Check low <= open/close <= high and low <= high."""
+        records = []
+        required = {"open", "high", "low", "close"}
+        for filename, df in self.data.items():
+            if not required.issubset(df.columns):
+                continue
+            invalid = df[
+                (df["high"] < df[["open", "close", "low"]].max(axis=1))
+                | (df["low"] > df[["open", "close", "high"]].min(axis=1))
+            ]
+            for position in df.index.get_indexer(invalid.index):
+                row = df.iloc[position]
+                if "date" in df.columns:
+                    date = pd.to_datetime(row["date"])
+                else:
+                    index_value = df.index[position]
+                    date = pd.to_datetime(index_value[-1] if isinstance(index_value, tuple) else index_value)
+                records.append(
+                    {
+                        "instruments": filename,
+                        "date": date.strftime("%Y-%m-%d"),
+                        "open": row["open"],
+                        "high": row["high"],
+                        "low": row["low"],
+                        "close": row["close"],
+                    }
+                )
+        result_df = pd.DataFrame(records)
+        if not result_df.empty:
+            return result_df.set_index("instruments")
+        logger.info("✅ All OHLC rows satisfy low <= open/close <= high.")
+        return None
+
+    def check_negative_values(self) -> Optional[pd.DataFrame]:
+        """Check that volume and amount/money are non-negative."""
+        records = []
+        for filename, df in self.data.items():
+            counts = {}
+            for col in ["volume", "amount", "money"]:
+                if col in df.columns:
+                    count = int((df[col].dropna() < 0).sum())
+                    if count:
+                        counts[f"negative_{col}_count"] = count
+            if counts:
+                records.append({"instruments": filename, **counts})
+        result_df = pd.DataFrame(records)
+        if not result_df.empty:
+            return result_df.set_index("instruments").fillna(0).astype(int)
+        logger.info("✅ Volume and amount/money contain no negative values.")
+        return None
+
+    def check_duplicate_dates(self) -> Optional[pd.DataFrame]:
+        """Check duplicate dates within each instrument."""
+        records = []
+        for filename, df in self.data.items():
+            dates = df["date"] if "date" in df.columns else df.index.get_level_values(-1)
+            duplicate_count = int(pd.Index(dates).duplicated().sum())
+            if duplicate_count:
+                records.append({"instruments": filename, "duplicate_date_count": duplicate_count})
+        result_df = pd.DataFrame(records)
+        if not result_df.empty:
+            return result_df.set_index("instruments")
+        logger.info("✅ There are no duplicate dates within instruments.")
+        return None
+
     def check_missing_factor(self) -> Optional[pd.DataFrame]:
-        """Check if the 'factor' column is missing in the DataFrame."""
+        """Check whether factor exists and contains missing/non-positive values."""
         result_dict = {
             "instruments": [],
             "missing_factor_col": [],
-            "missing_factor_data": [],
+            "missing_factor_count": [],
+            "nonpositive_factor_count": [],
         }
         for filename, df in self.data.items():
-            if "000300" in filename or "000903" in filename or "000905" in filename:
-                continue
             if "factor" not in df.columns:
                 result_dict["instruments"].append(filename)
                 result_dict["missing_factor_col"].append(True)
-            if df["factor"].isnull().all():
-                if filename in result_dict["instruments"]:
-                    result_dict["missing_factor_data"].append(True)
-                else:
-                    result_dict["instruments"].append(filename)
-                    result_dict["missing_factor_col"].append(False)
-                    result_dict["missing_factor_data"].append(True)
+                result_dict["missing_factor_count"].append(len(df))
+                result_dict["nonpositive_factor_count"].append(0)
+                continue
+
+            market_columns = [col for col in ["open", "high", "low", "close", "volume"] if col in df.columns]
+            # Qlib aligns instruments to the shared calendar. Suspension/non-trading
+            # rows are all-NaN by design, so factor is required only on rows that
+            # contain at least one market-data value.
+            active_rows = df[market_columns].notna().any(axis=1) if market_columns else pd.Series(True, index=df.index)
+            missing_count = int((active_rows & df["factor"].isnull()).sum())
+            nonpositive_count = int((df["factor"].dropna() <= 0).sum())
+            if missing_count or nonpositive_count:
+                result_dict["instruments"].append(filename)
+                result_dict["missing_factor_col"].append(False)
+                result_dict["missing_factor_count"].append(missing_count)
+                result_dict["nonpositive_factor_count"].append(nonpositive_count)
 
         result_df = pd.DataFrame(result_dict).set_index("instruments")
         if not result_df.empty:
@@ -211,17 +298,51 @@ class DataHealthChecker:
             logger.info(f"✅ The `factor` column already exists and is not empty.")
             return None
 
+    def _save_reports(self, results):
+        if not self.report_dir:
+            return
+        os.makedirs(self.report_dir, exist_ok=True)
+        summary = {"files_checked": len(self.data), "checks": {}}
+        for name, result in results.items():
+            issue_count = 0 if result is None else len(result)
+            summary["checks"][name] = {"issue_count": issue_count}
+            report_path = os.path.join(self.report_dir, f"{name}.csv")
+            if isinstance(result, pd.DataFrame) and not result.empty:
+                result.to_csv(report_path)
+            elif os.path.exists(report_path):
+                os.remove(report_path)
+        with open(os.path.join(self.report_dir, "summary.json"), "w", encoding="utf-8") as f:
+            json.dump(summary, f, ensure_ascii=False, indent=2)
+        logger.info(f"Health-check reports saved to {self.report_dir}")
+
     def check_data(self):
         check_missing_data_result = self.check_missing_data()
         check_large_step_changes_result = self.check_large_step_changes()
         check_required_columns_result = self.check_required_columns()
         check_missing_factor_result = self.check_missing_factor()
+        check_ohlc_consistency_result = self.check_ohlc_consistency()
+        check_negative_values_result = self.check_negative_values()
+        check_duplicate_dates_result = self.check_duplicate_dates()
         check_features_dir_case_result = self.check_features_dir_lowercase()
+        results = {
+            "missing_data": check_missing_data_result,
+            "large_step_changes": check_large_step_changes_result,
+            "required_columns": check_required_columns_result,
+            "missing_factor": check_missing_factor_result,
+            "ohlc_consistency": check_ohlc_consistency_result,
+            "negative_values": check_negative_values_result,
+            "duplicate_dates": check_duplicate_dates_result,
+            "features_dir_case": check_features_dir_case_result,
+        }
+        self._save_reports(results)
         if (
-            check_large_step_changes_result is not None
+            check_missing_data_result is not None
             or check_large_step_changes_result is not None
             or check_required_columns_result is not None
             or check_missing_factor_result is not None
+            or check_ohlc_consistency_result is not None
+            or check_negative_values_result is not None
+            or check_duplicate_dates_result is not None
             or check_features_dir_case_result is not None
         ):
             print(f"\nSummary of data health check ({len(self.data)} files checked):")
@@ -236,8 +357,17 @@ class DataHealthChecker:
                 logger.warning(f"Columns (OLHCV) are missing.")
                 print(check_required_columns_result)
             if isinstance(check_missing_factor_result, pd.DataFrame):
-                logger.warning(f"The factor column does not exist or is empty")
+                logger.warning("The factor column is missing or has missing/non-positive values on active rows.")
                 print(check_missing_factor_result)
+            if isinstance(check_ohlc_consistency_result, pd.DataFrame):
+                logger.warning("Some rows violate OHLC consistency constraints.")
+                print(check_ohlc_consistency_result)
+            if isinstance(check_negative_values_result, pd.DataFrame):
+                logger.warning("Volume or amount/money contains negative values.")
+                print(check_negative_values_result)
+            if isinstance(check_duplicate_dates_result, pd.DataFrame):
+                logger.warning("Some instruments contain duplicate dates.")
+                print(check_duplicate_dates_result)
             if isinstance(check_features_dir_case_result, pd.DataFrame):
                 logger.warning(
                     f"Some subdirectories under `{os.path.join(self.qlib_dir, 'features')}` contain uppercase letters, please rename them to lowercase manually."
