@@ -47,6 +47,7 @@ STOCK_FIELDS = [
     "high",
     "low",
     "close",
+    "change",
     "volume",
     "amount",
     "factor",
@@ -176,6 +177,9 @@ def export_parquet_to_symbol_csv():
                     ROUND(t.high  * t.adj_factor, 4) AS high,
                     ROUND(t.low   * t.adj_factor, 4) AS low,
                     ROUND(t.close * t.adj_factor, 4) AS close,
+
+                    -- Qlib 的涨跌停阈值使用小数收益率；Tushare pct_chg 的单位是百分比
+                    t.pct_chg / 100.0 AS change,
                 
                     -- 量纲换算: 手 -> 股, 千元 -> 元
                     COALESCE(t.vol, 0.0) * 100.0 / t.adj_factor AS volume,
@@ -233,6 +237,7 @@ def export_parquet_to_symbol_csv():
                     strftime(strptime(trade_date::VARCHAR, '%Y%m%d'), '%Y-%m-%d') AS date,
                     regexp_replace(ts_code, '^([0-9]+)\.([A-Za-z]+)$', '\\2\\1') AS symbol,
                     open, high, low, close,
+                    pct_chg / 100.0 AS change,
                     COALESCE(vol * 100, 0.0) AS volume,
                     COALESCE(amount * 1000, 0.0) AS amount,
                     1.0 AS factor,
