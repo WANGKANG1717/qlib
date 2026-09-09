@@ -6,7 +6,9 @@ from pathlib import Path
 import sys
 
 import fire
+import mlflow
 from jinja2 import Template, meta
+from mlflow.entities import SpanType
 from ruamel.yaml import YAML
 
 import qlib
@@ -18,6 +20,35 @@ from qlib.utils.data import update_config
 
 set_log_with_config(C.logging_config)
 logger = get_module_logger("qrun", logging.INFO)
+
+
+def configure_mlflow(config, experiment_name):
+    """Configure MLflow tracking and tracing for a Qlib workflow."""
+    qlib_init = config.setdefault("qlib_init", {})
+    exp_manager = qlib_init.get("exp_manager", {})
+    exp_manager_kwargs = exp_manager.get("kwargs", {})
+    tracking_uri = os.getenv("MLFLOW_TRACKING_URI") or exp_manager_kwargs.get("uri")
+
+    if not tracking_uri:
+        raise ValueError(
+            "MLflow tracking URI is not configured. Set MLFLOW_TRACKING_URI or "
+            "qlib_init.exp_manager.kwargs.uri in the workflow config."
+        )
+
+    # Keep Qlib's run tracking and MLflow Tracing on the same backend.
+    if exp_manager:
+        exp_manager.setdefault("kwargs", {})["uri"] = tracking_uri
+
+    mlflow.set_tracking_uri(tracking_uri)
+    mlflow.set_experiment(experiment_name)
+    mlflow.autolog()
+
+
+@mlflow.trace(name="qrun.workflow", span_type=SpanType.CHAIN)
+def run_traced_workflow(task, experiment_name, config):
+    """Train and record a Qlib workflow inside one end-to-end MLflow trace."""
+    recorder = task_train(task, experiment_name=experiment_name)
+    recorder.save_objects(config=config)
 
 
 def get_path_list(path):
@@ -135,6 +166,10 @@ def workflow(config_path, experiment_name="workflow", uri_folder="mlruns"):
     # config the `sys` section
     sys_config(config, config_path)
 
+    if "experiment_name" in config:
+        experiment_name = config["experiment_name"]
+    configure_mlflow(config, experiment_name)
+
     if "exp_manager" in config.get("qlib_init"):
         qlib.init(**config.get("qlib_init"))
     else:
@@ -142,10 +177,7 @@ def workflow(config_path, experiment_name="workflow", uri_folder="mlruns"):
         exp_manager["kwargs"]["uri"] = "file:" + str(Path(os.getcwd()).resolve() / uri_folder)
         qlib.init(**config.get("qlib_init"), exp_manager=exp_manager)
 
-    if "experiment_name" in config:
-        experiment_name = config["experiment_name"]
-    recorder = task_train(config.get("task"), experiment_name=experiment_name)
-    recorder.save_objects(config=config)
+    run_traced_workflow(config.get("task"), experiment_name, config)
 
 
 # function to run workflow by config

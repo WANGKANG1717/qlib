@@ -34,7 +34,7 @@ dependencies = [
   # I encoutered an Error that the set_uri does not work when downloading artifacts in mlflow 3.1.1;
   # But earlier versions of mlflow does not have this problem.
   # But when I switch to 2.*.* version, another error occurs, which is even more strange...
-  "mlflow",
+  "mlflow>=3.8.0",
   "filelock>=3.16.0",
   "redis",
   "dill",
