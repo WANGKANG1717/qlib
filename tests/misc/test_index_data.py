@@ -3,6 +3,7 @@ import pandas as pd
 import qlib.utils.index_data as idd
 
 import unittest
+import warnings
 
 
 class IndexDataTest(unittest.TestCase):
@@ -144,6 +145,11 @@ class IndexDataTest(unittest.TestCase):
         self.assertEqual(np.nanmean(sd1), 2.5)
         self.assertEqual(np.mean(sd1), 2.5)
         self.assertEqual(sd1.mean(), 2.5)
+
+        with warnings.catch_warnings():
+            warnings.simplefilter("error", RuntimeWarning)
+            self.assertTrue(np.isnan(idd.SingleData().mean()))
+            self.assertTrue(np.isnan(idd.SingleData([np.nan]).mean()))
 
 
 if __name__ == "__main__":
