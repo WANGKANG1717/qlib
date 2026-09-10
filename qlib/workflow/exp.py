@@ -8,6 +8,7 @@ from mlflow.entities import ViewType
 from mlflow.exceptions import MlflowException
 from .recorder import Recorder, MLflowRecorder
 from ..log import get_module_logger
+from datetime import datetime
 
 logger = get_module_logger("workflow")
 
@@ -248,7 +249,7 @@ class MLflowExperiment(Experiment):
     def __init__(self, id, name, uri):
         super(MLflowExperiment, self).__init__(id, name)
         self._uri = uri
-        self._default_rec_name = "mlflow_recorder"
+        self._default_rec_name = "mlflow_recorder_" + datetime.now().strftime("%Y%m%d_%H%M%S")
         self._client = mlflow.tracking.MlflowClient(tracking_uri=self._uri)
 
     def __repr__(self):
