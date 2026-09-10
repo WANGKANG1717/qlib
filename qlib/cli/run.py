@@ -2,6 +2,8 @@
 #  Licensed under the MIT License.
 import logging
 import os
+os.environ["MLFLOW_ALLOW_FILE_STORE"] = "true"
+
 from pathlib import Path
 import sys
 
