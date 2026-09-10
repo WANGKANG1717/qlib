@@ -6,6 +6,7 @@ os.environ["MLFLOW_ALLOW_FILE_STORE"] = "true"
 
 from pathlib import Path
 import sys
+import tempfile
 
 import fire
 from jinja2 import Template, meta
@@ -51,7 +52,7 @@ def sys_config(config, config_path):
         sys.path.append(str(Path(config_path).parent.resolve().absolute() / p))
 
 
-def render_template(config_path: str) -> str:
+def render_template(config_path: str, config_content: str = None) -> str:
     """
     render the template based on the environment
 
@@ -65,8 +66,11 @@ def render_template(config_path: str) -> str:
     str
         the rendered content
     """
-    with open(config_path, "r") as f:
-        config = f.read()
+    if config_content is None:
+        with open(config_path, "r") as f:
+            config = f.read()
+    else:
+        config = config_content
     # Set up the Jinja2 environment
     template = Template(config)
 
@@ -104,8 +108,13 @@ def workflow(config_path, experiment_name="workflow", uri_folder="mlruns"):
         market: csi300
 
     """
+    config_path = Path(config_path).resolve()
+    with config_path.open("r") as fp:
+        source_config_content = fp.read()
+    base_config_source = None
+
     # Render the template
-    rendered_yaml = render_template(config_path)
+    rendered_yaml = render_template(config_path, source_config_content)
     yaml = YAML(typ="safe", pure=True)
     config = yaml.load(rendered_yaml)
 
@@ -128,9 +137,12 @@ def workflow(config_path, experiment_name="workflow", uri_folder="mlruns"):
             else:
                 raise FileNotFoundError(f"Can't find the BASE_CONFIG file: {base_config_path}")
 
-        with open(path) as fp:
-            yaml = YAML(typ="safe", pure=True)
-            base_config = yaml.load(fp)
+        path = path.resolve()
+        with path.open("r") as fp:
+            base_config_content = fp.read()
+        base_config_source = (path.name, base_config_content)
+        yaml = YAML(typ="safe", pure=True)
+        base_config = yaml.load(base_config_content)
         logger.info(f"Load BASE_CONFIG_PATH succeed: {path.resolve()}")
         config = update_config(base_config, config)
 
@@ -146,8 +158,32 @@ def workflow(config_path, experiment_name="workflow", uri_folder="mlruns"):
 
     if "experiment_name" in config:
         experiment_name = config["experiment_name"]
-    recorder = task_train(config.get("task"), experiment_name=experiment_name)
-    recorder.save_objects(config=config)
+
+    # Serialize the fully rendered and merged config before training starts.
+    # This freezes the config for the current run even if its source YAML is
+    # edited while the training process is still running.
+    with tempfile.TemporaryDirectory() as temp_dir:
+        temp_path = Path(temp_dir)
+        config_yaml_path = temp_path / "config.yaml"
+        output_yaml = YAML(typ="safe", pure=True)
+        with config_yaml_path.open("w", encoding="utf-8") as fp:
+            output_yaml.dump(config, fp)
+
+        source_config_path = temp_path / config_path.name
+        source_config_path.write_text(source_config_content, encoding="utf-8")
+
+        base_config_path = None
+        if base_config_source is not None:
+            base_config_path = temp_path / "base" / base_config_source[0]
+            base_config_path.parent.mkdir()
+            base_config_path.write_text(base_config_source[1], encoding="utf-8")
+
+        recorder = task_train(config.get("task"), experiment_name=experiment_name)
+        recorder.save_objects(config=config)
+        recorder.log_artifact(str(config_yaml_path))
+        recorder.log_artifact(str(source_config_path), artifact_path="workflow_config")
+        if base_config_path is not None:
+            recorder.log_artifact(str(base_config_path), artifact_path="workflow_config/base")
 
 
 # function to run workflow by config
