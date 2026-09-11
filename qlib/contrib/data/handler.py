@@ -114,13 +114,20 @@ class Alpha158(DataHandlerLP):
         infer_processors = check_transform_proc(infer_processors, fit_start_time, fit_end_time)
         learn_processors = check_transform_proc(learn_processors, fit_start_time, fit_end_time)
 
+        # Optional extra columns used by custom processors (for example,
+        # industry/market-cap neutralization and stock-status filtering).
+        raw = kwargs.pop("raw", None)
+
+        loader_config = {
+            "feature": self.get_feature_config(),
+            "label": kwargs.pop("label", self.get_label_config()),
+        }
+        if raw is not None:
+            loader_config["raw"] = raw
         data_loader = {
             "class": "QlibDataLoader",
             "kwargs": {
-                "config": {
-                    "feature": self.get_feature_config(),
-                    "label": kwargs.pop("label", self.get_label_config()),
-                },
+                "config": loader_config,
                 "filter_pipe": filter_pipe,
                 "freq": freq,
                 "inst_processors": inst_processors,
