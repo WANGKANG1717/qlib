@@ -105,7 +105,13 @@ def end_task_train(rec: Recorder, experiment_name: str) -> Recorder:
     return rec
 
 
-def task_train(task_config: dict, experiment_name: str, recorder_name: str = None) -> Recorder:
+def task_train(
+    task_config: dict,
+    experiment_name: str,
+    recorder_name: str = None,
+    tags: Optional[dict] = None,
+    description: Optional[str] = None,
+) -> Recorder:
     """
     Task based training, will be divided into two steps.
 
@@ -117,6 +123,10 @@ def task_train(task_config: dict, experiment_name: str, recorder_name: str = Non
         The name of experiment
     recorder_name: str
         The name of recorder
+    tags: dict
+        Tags written to the recorder as soon as it is created.
+    description: str
+        Optional MLflow run description.
 
     Returns
     ----------
@@ -124,6 +134,10 @@ def task_train(task_config: dict, experiment_name: str, recorder_name: str = Non
     """
     with R.start(experiment_name=experiment_name, recorder_name=recorder_name):
         _log_task_info(task_config)
+        if tags:
+            R.set_tags(**tags)
+        if description:
+            R.set_tags(**{"mlflow.note.content": description})
         _exe_task(task_config)
         return R.get_recorder()
 

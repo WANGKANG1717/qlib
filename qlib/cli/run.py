@@ -178,7 +178,13 @@ def workflow(config_path, experiment_name="workflow", uri_folder="mlruns"):
             base_config_path.parent.mkdir()
             base_config_path.write_text(base_config_source[1], encoding="utf-8")
 
-        recorder = task_train(config.get("task"), experiment_name=experiment_name)
+        recorder = task_train(
+            config.get("task"),
+            experiment_name=experiment_name,
+            recorder_name=config.get("run_name"),
+            tags=config.get("tags"),
+            description=config.get("description"),
+        )
         recorder.save_objects(config=config)
         recorder.log_artifact(str(config_yaml_path))
         recorder.log_artifact(str(source_config_path), artifact_path="workflow_config")
