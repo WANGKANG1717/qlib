@@ -340,7 +340,7 @@ def model_performance_graph(
     :param N: group number, default 5.
     :param reverse: if `True`, `pred['score'] *= -1`.
     :param rank: if **True**, calculate rank ic.
-    :param graph_names: graph names; default ['cumulative_return', 'pred_ic', 'pred_autocorr', 'pred_turnover'].
+    :param graph_names: graph names; default ['group_return', 'pred_ic', 'pred_autocorr', 'pred_turnover'].
     :param show_notebook: whether to display graphics in notebook, the default is `True`.
     :param show_nature_day: whether to display the abscissa of non-trading day.
     :param \*\*kwargs: contains some parameters to control plot style in plotly. Currently, supports
