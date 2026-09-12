@@ -1,7 +1,15 @@
-experiment_name: lightgbm_alpha158
+# 后续操作：关闭涨跌停 + CSRankNorm + 收盘价
+experiment_name: lightgbm_alpha158_test
+# run_name 不填会自动随机
+# run_name: 
+tags:
+    desc: &desc 关闭涨跌停 + CSRankNorm + 收盘价
+description: *desc
+# ==============================================================================
 qlib_init:
     provider_uri: "C:\\Users\\WANGKANG\\.qlib\\qlib_data\\my_tushare_data"
     region: cn
+    limit_threshold: null
 market: &market zb
 benchmark: &benchmark SH000300
 data_handler_config: &data_handler_config
@@ -10,6 +18,23 @@ data_handler_config: &data_handler_config
     fit_start_time: 2010-01-01
     fit_end_time: 2019-12-31
     instruments: *market
+    # label:
+    #     - ["Ref($open, -2) / Ref($open, -1) - 1"]
+    #     - ["LABEL0"]
+    # raw: ["$total_mv", "$industry", "$is_ST", "$list_status"]
+    # shared_processors 同时作用于训练集和推理/回测数据，统一剔除非正常上市及 ST 股票。
+    # shared_processors:
+        # - class: StockFilterProcessor
+    # 先对 Alpha158 特征做每日横截面的行业 + 对数总市值中性化。
+    # 中性化后的 infer 数据也是 learn 数据的输入（Alpha158 默认 process_type=append）。
+    # infer_processors:
+    #     - class: CSNeutralize
+    # 让模型拟合排名，而不是未来收益
+    learn_processors:
+        - class: DropnaLabel
+        - class: CSRankNorm
+          kwargs:
+              fields_group: label
 port_analysis_config: &port_analysis_config
     strategy:
         class: TopkDropoutStrategy
@@ -26,7 +51,9 @@ port_analysis_config: &port_analysis_config
         account: 100000
         benchmark: *benchmark
         exchange_kwargs:
-            limit_threshold: 0.095
+            # limit_threshold: 0.095
+            limit_threshold: null
+            # deal_price: open
             deal_price: close
             open_cost: 0.0005
             close_cost: 0.0015
