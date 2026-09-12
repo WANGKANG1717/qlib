@@ -21,9 +21,7 @@ from qlib.contrib.data.handler import Alpha158
 from qlib.contrib.report import analysis_model
 from qlib.data import D
 from qlib.data.dataset.handler import DataHandler, DataHandlerLP
-from qlib.data.dataset.processor import (CSNeutralize, CSZScoreNorm, Fillna,
-                                         Processor, RobustZScoreNorm,
-                                         ZScoreNorm)
+from qlib.data.dataset.processor import CSZScoreNorm, Fillna, Processor, RobustZScoreNorm, ZScoreNorm
 from qlib.data.filter import ExpressionDFilter, NameDFilter
 from qlib.contrib.report import analysis_position
 
@@ -146,6 +144,7 @@ def get_features_labels_raws(instruments):
             # 预测阶段：只对特征(feature)填充缺失值，通常用0填充（因为你主要算比率）
             {"class": "CSZScoreNorm", "kwargs": {"fields_group": "feature", "method": "robust"}},
             {"class": "Fillna", "kwargs": {"fields_group": "feature", "fill_value": 0}},
+            {"class": "CSNeutralize"},
         ],
         learn_processors=[
             # {"class": "StockFilterProcessor"},
@@ -193,20 +192,6 @@ def get_features_labels_raws(instruments):
     df_raws = df_raws[(dt >= START_TIME) & (dt <= END_TIME)]
 
     return df_features, df_labels, df_raws
-
-def postProcess(df_raws, df_features):
-    """行业和市值中性化"""
-    df_style = common_utils.build_style_factors(df_raws)
-
-    factor_cols = df_features.columns.tolist()  # 10 个因子：KMID, KLEN...
-    style_cols = df_style.columns.tolist()  # log_mv + Ind_* 行业哑变量
-
-    df_for_neutralize = df_features.join(df_style, how="inner")
-
-    csNeutralize = CSNeutralize(factor_cols, style_cols)
-    return csNeutralize(df_for_neutralize)
-
-
 
 def run_full_factor_analysis(df_features, df_labels, target_label="RET_1D", n_groups=5):
     """
@@ -335,11 +320,6 @@ def main():
     print("正在加载数据...")
     df_features, df_labels, df_raws = get_features_labels_raws(instruments)  # 计算因子
     print("数据加载完成")
-
-    """ 行业和市值中性化 """
-    print("行业和市值中性化 中...")
-    df_features = postProcess(df_raws, df_features)  # 行业和市值中性化
-    print("行业和市值中性化 完成")
 
     print(df_features.shape)
     print(df_labels.shape)

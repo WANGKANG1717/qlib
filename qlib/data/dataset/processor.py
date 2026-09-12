@@ -418,88 +418,138 @@ class TimeRangeFlt(InstProcessor):
             return df
         return df.head(0)
 
+
+def build_style_factors(df, mv_col="$total_mv", industry_col="$industry", log_mv_name="log_mv", dummy_prefix="Ind", drop_first=False):
+    """
+    构建行业+市值风格因子（用于中性化）。
+
+    参数
+    ----
+    df           : DataFrame  行情/因子数据，MultiIndex=(instrument, datetime)，
+                              必须包含市值列与行业编码列
+    mv_col       : str  市值列名（默认 '$total_mv'）
+    industry_col : str  行业整数编码列名（默认 '$industry'）
+    log_mv_name  : str  输出的对数市值列名（默认 'log_mv'）
+    dummy_prefix : str  行业哑变量列名前缀（默认 'Ind'）
+    drop_first   : bool 是否丢弃第一个哑变量列以避免共线性（线性回归中性化建议 True）
+
+    返回
+    ----
+    DataFrame  与 df 同 index，列 = [log_mv] + 各行业哑变量列
+    """
+    # 1. 对数市值：防止 0 导致负无穷 (-inf)，将 0 和负数替换为 NaN
+    mv = df[mv_col].copy()
+    mv = mv.where(mv > 0, np.nan)
+    log_mv = np.log(mv).rename(log_mv_name)
+
+    # 2. 行业哑变量：行业编码转整数类别，避免被当连续值
+    df_industry = pd.get_dummies(
+        df[industry_col].astype("Int32"),  # 使用大写的 "Int32"（支持 NaN 的可空整数类型）
+        prefix=dummy_prefix,
+        drop_first=drop_first,
+        dtype="int8",  # 节省内存
+    )
+
+    # 3. 安全联动：如果某只股票本身缺失行业代码，将其对数市值也置为 NaN
+    # 这样 CSNeutralize 就会把这只股票识别为无效样本，不会参与截面中性化回归
+    log_mv[df[industry_col].isna()] = np.nan
+
+    # 4. 按 index 对齐拼接（共享同一 MultiIndex，比 merge 更安全）
+    df_style = pd.concat([log_mv, df_industry], axis=1)
+
+    assert len(df_style) == len(df), "拼接后行数与原始 df 不一致"
+    return df_style
+
+
 # ============================================================
 # 市场 / 行业中性化 Processor（符合 qlib Processor 接口规范）
 # ============================================================
 
 class CSNeutralize(Processor):
-    """
-    横截面市场/行业中性化 Processor（每日截面 OLS 回归取残差）
+    """每日按行业和对数市值对 ``feature`` 因子做截面中性化。"""
 
-    对每个交易日的横截面，用风格变量 X（市值 + 行业哑变量等）对每个因子 Y
-    做多元线性回归 Y = X·beta + 残差，取残差作为中性化后的纯净因子（Alpha）。
-
-    参数
-    ----
-    factor_cols : list[str]
-        待中性化的因子列名
-    style_cols : list[str]
-        风格自变量列名（如 ['log_mv', 'Ind_xxx', ...]，市值 + 行业哑变量）。
-        风格列须与 factor_cols 同在传入的 df 中。
-    min_stocks : int
-        当日有效样本数下限，不足则该日因子置为 NaN（回归无统计意义）
-    fit_intercept : bool
-        回归是否含截距，默认 True
-    drop_style : bool
-        中性化后是否从输出中丢弃风格列，默认 True（只保留残差因子）
-
-    用法
-    ----
-    与 qlib 内置 Processor 一致，可直接放进 handler 的 learn/infer_processors；
-    也可脱离 qlib 单独调用：df_out = CSNeutralize(factor_cols, style_cols)(df)
-    """
-
-    def __init__(self, factor_cols, style_cols, min_stocks=50,
-                 fit_intercept=True, drop_style=True):
-        self.factor_cols = list(factor_cols)
-        self.style_cols = list(style_cols)
+    def __init__(
+        self,
+        fields_group="feature",
+        raw_group="raw",
+        mv_col="$total_mv",
+        industry_col="$industry",
+        min_stocks=50,
+        fit_intercept=True,
+    ):
+        self.fields_group = fields_group
+        self.raw_group = raw_group
+        self.mv_col = mv_col
+        self.industry_col = industry_col
         self.min_stocks = min_stocks
         self.fit_intercept = fit_intercept
-        self.drop_style = drop_style
 
     def fit(self, df=None):
-        # 截面回归为无状态处理（每日独立），无需拟合全局参数
+        # 每日截面独立回归，不需要拟合全局参数。
         pass
 
-    def _neutralize_daily(self, daily_df):
-        try:
-            from sklearn.linear_model import LinearRegression
-        except:
-            print("导入LinearRegression失败，请检查是否安装sklearn包")
+    def _neutralize_daily(self, daily_df, factor_cols, style_cols):
+        result = pd.DataFrame(np.nan, index=daily_df.index, columns=factor_cols, dtype=float)
 
-        """单日截面中性化：返回残差因子 DataFrame（index 与输入的有效行对齐）"""
-        # 剔除风格列有缺失的股票（无法进入回归）
-        valid_mask = ~daily_df[self.style_cols].isna().any(axis=1)
-        valid_df = daily_df[valid_mask]
-
-        # 当日有效样本过少，回归无意义，整体置 NaN
+        style = daily_df[style_cols].replace([np.inf, -np.inf], np.nan)
+        valid_mask = ~style.isna().any(axis=1)
+        valid_df = daily_df.loc[valid_mask]
         if len(valid_df) < self.min_stocks:
-            return pd.DataFrame(index=daily_df.index, columns=self.factor_cols)
+            return result
 
-        X = valid_df[self.style_cols].values
-        # 因子缺失先用截面均值填补，整列全 NaN 再填 0，避免回归矩阵报错
-        Y = (valid_df[self.factor_cols]
-             .fillna(valid_df[self.factor_cols].mean())
-             .fillna(0)
-             .values)
+        X = style.loc[valid_mask].to_numpy(dtype=float)
+        if self.fit_intercept:
+            X = np.column_stack([np.ones(len(X)), X])
 
-        model = LinearRegression(fit_intercept=self.fit_intercept)
-        model.fit(X, Y)
-        residuals = Y - model.predict(X)
+        # 全部因子共用设计矩阵，一次最小二乘完成当日回归。临时填补只用于
+        # 求解，输出时恢复原本的 NaN/inf，避免人为生成可用于训练的因子值。
+        factors = valid_df[factor_cols].replace([np.inf, -np.inf], np.nan)
+        original_notna = factors.notna()
+        filled_factors = factors.fillna(factors.mean()).fillna(0)
+        coefficients = np.linalg.lstsq(X, filled_factors.to_numpy(dtype=float), rcond=None)[0]
+        residuals = pd.DataFrame(
+            filled_factors.to_numpy(dtype=float) - X @ coefficients,
+            index=valid_df.index,
+            columns=factor_cols,
+        ).where(original_notna)
 
-        return pd.DataFrame(residuals, index=valid_df.index, columns=self.factor_cols)
+        result.loc[valid_df.index, factor_cols] = residuals
+        return result
 
     def __call__(self, df):
-        # tqdm 用于显示进度条
         from tqdm import tqdm
-        tqdm.pandas(desc="截面中性化进度")
-        # 逐日截面回归取残差
-        res = df.groupby(level="datetime", group_keys=False).progress_apply(self._neutralize_daily)
-        if self.drop_style:
-            return res
-        # 保留风格列：把残差因子写回原 df 对应位置
+        tqdm.pandas(desc="行业/市值中性化进度")
+        if not isinstance(df.columns, pd.MultiIndex):
+            raise ValueError("CSNeutralize expects MultiIndex columns containing feature and raw groups")
+
+        groups = df.columns.get_level_values(0)
+        if self.fields_group not in groups:
+            raise KeyError(f"column group {self.fields_group!r} not found")
+        if self.raw_group not in groups:
+            raise KeyError(f"column group {self.raw_group!r} not found")
+
+        features = df[self.fields_group]
+        raw = df[self.raw_group]
+        missing_raw_cols = [col for col in (self.mv_col, self.industry_col) if col not in raw.columns]
+        if missing_raw_cols:
+            raise KeyError(f"raw columns required by CSNeutralize are missing: {missing_raw_cols}")
+
+        style = build_style_factors(raw, mv_col=self.mv_col, industry_col=self.industry_col)
+        factor_cols = features.columns.tolist()
+        style_cols = style.columns.tolist()
+        data = features.join(style, how="left")
+        neutralized = data.groupby(level="datetime", group_keys=False).progress_apply(
+            self._neutralize_daily,
+            factor_cols=factor_cols,
+            style_cols=style_cols,
+        )
+        neutralized = neutralized.reindex(features.index)
+
+        # 完整保留 feature/label/raw 结构，只覆盖 feature 的值。
         out = df.copy()
-        out[self.factor_cols] = res[self.factor_cols]
+        feature_columns = out.columns[groups == self.fields_group]
+        for feature_column, factor_col in zip(feature_columns, factor_cols):
+            out[feature_column] = neutralized[factor_col].astype(features[factor_col].dtype)
         return out
 
 
