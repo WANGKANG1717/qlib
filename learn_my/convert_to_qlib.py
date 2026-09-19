@@ -63,6 +63,7 @@ STOCK_FIELDS = [
     "dv_ttm",
     "total_mv",
     "circ_mv",
+    "limit_status", # 收盘涨跌状态：0-平盘，1-上涨(不含涨停)，2-涨停(不含一字涨停)，3-一字涨停，4-下跌(不含跌停)，5-跌停(不含一字跌停)，6-一字跌停
     # 【新增字段】
     "industry",  # 行业整型编码
     "is_ST",  # ST 标记 (0/1)
@@ -170,7 +171,7 @@ def export_parquet_to_symbol_csv():
             COPY (
                 SELECT 
                     strftime(strptime(t.trade_date::VARCHAR, '%Y%m%d'), '%Y-%m-%d') AS date,
-                    regexp_replace(t.ts_code, '^([0-9]+)\.([A-Za-z]+)$', '\\2\\1') AS symbol,
+                    regexp_replace(t.ts_code, '^([0-9]+)\\.([A-Za-z]+)$', '\\2\\1') AS symbol,
                     
                     -- 核心：转换为后复权价格 (Raw * Factor)
                     ROUND(t.open  * t.adj_factor, 4) AS open,
@@ -208,6 +209,7 @@ def export_parquet_to_symbol_csv():
                     t.dv_ttm,
                     t.total_mv,
                     t.circ_mv,
+                    t.limit_status,
                     
                     -- 【新增拼接字段】
                     COALESCE(m.industry_code, 0) AS industry,
@@ -235,7 +237,7 @@ def export_parquet_to_symbol_csv():
             COPY (
                 SELECT
                     strftime(strptime(trade_date::VARCHAR, '%Y%m%d'), '%Y-%m-%d') AS date,
-                    regexp_replace(ts_code, '^([0-9]+)\.([A-Za-z]+)$', '\\2\\1') AS symbol,
+                    regexp_replace(ts_code, '^([0-9]+)\\.([A-Za-z]+)$', '\\2\\1') AS symbol,
                     open, high, low, close,
                     pct_chg / 100.0 AS change,
                     COALESCE(vol * 100, 0.0) AS volume,
@@ -245,6 +247,7 @@ def export_parquet_to_symbol_csv():
                     turnover_rate, turnover_rate_f, pe, pe_ttm, pb, 
                     NULL AS ps, NULL AS ps_ttm,
                     NULL AS dv_ratio, NULL AS dv_ttm, total_mv, float_mv AS circ_mv,
+                    NULL AS limit_status,
                     
                     -- 【必须对齐 STOCK_FIELDS】：指数无此类属性，统一补 0
                     0 AS industry,
@@ -267,7 +270,7 @@ def export_parquet_to_symbol_csv():
     #         COPY (
     #             SELECT
     #                 strftime(strptime(trade_date::VARCHAR, '%Y%m%d'), '%Y-%m-%d') AS date,
-    #                 regexp_replace(ts_code, '^([0-9]+)\.([A-Za-z]+)$', '\\2\\1') AS symbol,
+    #                 regexp_replace(ts_code, '^([0-9]+)\\.([A-Za-z]+)$', '\\2\\1') AS symbol,
 
     #                 -- ETF 后复权价格 (Raw * Factor)
     #                 ROUND(open * COALESCE(adj_factor, 1.0), 4) AS open,
@@ -305,13 +308,41 @@ def export_parquet_to_symbol_csv():
     # 4. 扁平化 DuckDB 分区文件夹结构为 {symbol}.csv
     logging.info("  正在整理临时 CSV 文件名...")
     for root, dirs, files in os.walk(TEMP_CSV_DIR):
-        for file in files:
-            if file.endswith(".csv"):
-                parent_dir = os.path.basename(root)
-                if "symbol=" in parent_dir:
-                    symbol = parent_dir.replace("symbol=", "")
-                    target_file = os.path.join(TEMP_CSV_DIR, f"{symbol}.csv")
-                    shutil.move(os.path.join(root, file), target_file)
+        parent_dir = os.path.basename(root)
+
+        if not parent_dir.startswith("symbol="):
+            continue
+
+        symbol = parent_dir.removeprefix("symbol=")
+        target_file = os.path.join(TEMP_CSV_DIR, f"{symbol}.csv")
+
+        files_ = sorted(os.path.join(root, file) for file in files if file.endswith(".csv"))
+
+        if not files_:
+            raise RuntimeError(f"{symbol} 分区中没有 CSV 文件")
+
+        if len(files_) == 1:
+            shutil.move(files_[0], target_file)
+            continue
+
+        df = pd.concat(
+            [pd.read_csv(file, low_memory=False) for file in files_],
+            ignore_index=True,
+        )
+
+        df["date"] = pd.to_datetime(df["date"], errors="raise")
+
+        duplicated = df["date"].duplicated(keep=False)
+        if duplicated.any():
+            dates = df.loc[duplicated, "date"].dt.strftime("%Y-%m-%d").unique()
+            raise RuntimeError(f"{symbol} 存在重复日期，例如：{dates[:5].tolist()}")
+
+        df.sort_values("date", kind="stable", inplace=True)
+        df.to_csv(
+            target_file,
+            index=False,
+            date_format="%Y-%m-%d",
+        )
 
     # 清空 DuckDB 生成的分区文件夹 (保留 CSV 文件)
     for d in os.listdir(TEMP_CSV_DIR):
@@ -559,4 +590,5 @@ def main(clean_temp_csv: bool = True):
 
 if __name__ == "__main__":
     # clean_temp_csv=True 会在生成二进制后自动删除中间 CSV，节省磁盘空间
+    # 注意，不考虑使用qlib的增量更新，太慢了 5-6小时
     main(clean_temp_csv=False)
