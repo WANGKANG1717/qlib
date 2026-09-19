@@ -60,13 +60,19 @@ def plot_interval_win_rate(result: pd.DataFrame, show_notebook=True):
             x=labels,
             y=win_rates,
             marker_color=np.where(win_rates >= 0.5, "#2E8B57", "#D95F59"),
-            customdata=np.column_stack([sample_counts, result["win_count"], result["ic_min"], result["ic_max"]]),
+            customdata=np.column_stack([sample_counts, result["win_count"], result["ic_min"], result["ic_max"], result["average_return"], result["median_return"]]),
             text=win_rates,
             texttemplate="%{text:.1%}",
             textposition="outside",
             hovertemplate=(
-                "区间 %{x}<br>胜率 %{y:.2%}<br>样本数 %{customdata[0]:,.0f}"
-                "<br>胜次数 %{customdata[1]:,.0f}<br>实际 score %{customdata[2]:.5f} ~ %{customdata[3]:.5f}<extra></extra>"
+                "区间 %{x}<br>"
+                "胜率 %{y:.2%}<br>"
+                "样本数 %{customdata[0]:,.0f}<br>"
+                "胜次数 %{customdata[1]:,.0f}<br>"
+                "实际 score %{customdata[2]:.2f} ~ %{customdata[3]:.2f}<br>"
+                "平均收益 %{customdata[4]:.4%}<br>"
+                "收益中位数 %{customdata[5]:.4%}<br>"
+                "<extra></extra>"
             ),
             name="胜率",
         ),
