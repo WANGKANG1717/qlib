@@ -11,7 +11,7 @@ def calculate_interval_win_rate(
     bin_width: float = 0.1,
 ) -> pd.DataFrame:
     """按左闭右开区间统计收益大于 0 的比例。"""
-    frame = pred_label.copy()
+    frame = pred_label.copy().reset_index()
     frame = frame.replace([np.inf, -np.inf], np.nan).dropna()
 
     # 用整数区间编号避免 0.01 这类浮点数直接分组产生精度问题。
@@ -28,6 +28,7 @@ def calculate_interval_win_rate(
             # total_return=(return_col, "sum"),
             average_return=(return_col, "mean"),
             median_return=(return_col, "median"),
+            instrument_count=("instrument", "nunique") # 增加标的数量统计（nunique 表示统计该区间内出现过多少个不同的加密货币）
         )
         .reset_index()
     )
@@ -60,7 +61,7 @@ def plot_interval_win_rate(result: pd.DataFrame, show_notebook=True):
             x=labels,
             y=win_rates,
             marker_color=np.where(win_rates >= 0.5, "#2E8B57", "#D95F59"),
-            customdata=np.column_stack([sample_counts, result["win_count"], result["ic_min"], result["ic_max"], result["average_return"], result["median_return"]]),
+            customdata=np.column_stack([sample_counts, result["win_count"], result["ic_min"], result["ic_max"], result["average_return"], result["median_return"], result["instrument_count"]]),
             text=win_rates,
             texttemplate="%{text:.1%}",
             textposition="outside",
@@ -72,6 +73,7 @@ def plot_interval_win_rate(result: pd.DataFrame, show_notebook=True):
                 "实际 score %{customdata[2]:.2f} ~ %{customdata[3]:.2f}<br>"
                 "平均收益 %{customdata[4]:.4%}<br>"
                 "收益中位数 %{customdata[5]:.4%}<br>"
+                "标的数量 %{customdata[6]:,.0f}<br>"
                 "<extra></extra>"
             ),
             name="胜率",
