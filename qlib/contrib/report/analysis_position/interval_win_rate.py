@@ -48,6 +48,33 @@ def plot_interval_win_rate(result: pd.DataFrame, show_notebook=True):
     average_returns = result["average_return"].to_numpy(dtype=float)
     median_returns = result["median_return"].to_numpy(dtype=float)
 
+    # ==========================================
+    # 构建统一的悬停数据和模板
+    # ==========================================
+    def build_customdata(df):
+        return np.column_stack([
+            df["win_rate"].fillna(0), # 填充 0 防止前端格式化报错
+            df["sample_count"],
+            df["win_count"],
+            df["ic_min"],
+            df["ic_max"],
+            df["average_return"],
+            df["median_return"],
+            df["instrument_count"],
+        ])
+    cd_all = build_customdata(result)
+    unified_hover = (
+        "区间: %{x}<br>"
+        "胜率: %{customdata[0]:.2%}<br>"
+        "样本数: %{customdata[1]:,.0f}<br>"
+        "胜次数: %{customdata[2]:,.0f}<br>"
+        "实际 score: %{customdata[3]:.2f} ~ %{customdata[4]:.2f}<br>"
+        "平均收益: %{customdata[5]:.4%}<br>"
+        "收益中位数: %{customdata[6]:.4%}<br>"
+        "标的数量: %{customdata[7]:,.0f}<extra></extra>"
+    )
+
+
     figure = make_subplots(
         rows=4,
         cols=1,
@@ -61,21 +88,11 @@ def plot_interval_win_rate(result: pd.DataFrame, show_notebook=True):
             x=labels,
             y=win_rates,
             marker_color=np.where(win_rates >= 0.5, "#2E8B57", "#D95F59"),
-            customdata=np.column_stack([sample_counts, result["win_count"], result["ic_min"], result["ic_max"], result["average_return"], result["median_return"], result["instrument_count"]]),
             text=win_rates,
             texttemplate="%{text:.1%}",
             textposition="outside",
-            hovertemplate=(
-                "区间 %{x}<br>"
-                "胜率 %{y:.2%}<br>"
-                "样本数 %{customdata[0]:,.0f}<br>"
-                "胜次数 %{customdata[1]:,.0f}<br>"
-                "实际 score %{customdata[2]:.2f} ~ %{customdata[3]:.2f}<br>"
-                "平均收益 %{customdata[4]:.4%}<br>"
-                "收益中位数 %{customdata[5]:.4%}<br>"
-                "标的数量 %{customdata[6]:,.0f}<br>"
-                "<extra></extra>"
-            ),
+            customdata=cd_all,
+            hovertemplate=unified_hover,
             name="胜率",
         ),
         row=1,
@@ -87,7 +104,8 @@ def plot_interval_win_rate(result: pd.DataFrame, show_notebook=True):
             x=labels,
             y=sample_counts,
             marker_color="#4C78A8",
-            hovertemplate="区间 %{x}<br>样本数 %{y:,.0f}<extra></extra>",
+            customdata=cd_all,
+            hovertemplate=unified_hover,
             name="样本数",
         ),
         row=2,
@@ -103,7 +121,8 @@ def plot_interval_win_rate(result: pd.DataFrame, show_notebook=True):
                 x=labels,
                 y=values,
                 marker_color=np.where(values >= 0, color, "#D95F59"),
-                hovertemplate=f"区间 %{{x}}<br>{name} %{{y:.4%}}<extra></extra>",
+                customdata=cd_all,
+                hovertemplate=unified_hover,
                 name=name,
             ),
             row=row,
@@ -244,14 +263,12 @@ def plot_factor_time_series(
     )
 
     # 图2：胜率 (折线图)
-    valid_win = monthly_stats.dropna(subset=["win_rate"])
-    cd_valid = build_customdata(valid_win)
     fig.add_trace(
         go.Scatter(
-            x=valid_win.index, y=valid_win["win_rate"],
+            x=monthly_stats.index, y=monthly_stats["win_rate"],
             mode="lines+markers", name="胜率",
             line=dict(color="#E45756", width=2.5), marker=dict(size=6),
-            customdata=cd_valid, hovertemplate=unified_hover
+            customdata=cd_all, hovertemplate=unified_hover
         ), row=2, col=1
     )
     fig.add_hline(y=0.5, line_dash="dash", line_color="gray", row=2, col=1)
