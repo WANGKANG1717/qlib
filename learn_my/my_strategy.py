@@ -1,9 +1,8 @@
-import os
-import json
 import pandas as pd
 import qlib
 from qlib.constant import REG_US
 from qlib.contrib.data.handler import Alpha158
+import time
 
 # ==========================================
 # 基础配置与动态时间计算
@@ -22,6 +21,7 @@ PROVIDER_URI = r"C:\Users\WANGKANG\.qlib\qlib_data\binance_data"
 MARKET = "all"
 
 if __name__ == "__main__":
+    start_time = time.time()
     print("初始化 Qlib...")
     qlib.init(provider_uri=PROVIDER_URI, region=REG_US, limit_threshold=None)
 
@@ -33,11 +33,14 @@ if __name__ == "__main__":
         "start_time": START_DATE,
         "end_time": TARGET_DATE, 
         "instruments": MARKET,
+        "label": (
+            ["Ref($open, -2) / Ref($open, -1) - 1"], 
+            ["LABEL0"]
+        ),
     }
 
     handler = Alpha158(**data_handler_config)
-    df_features = handler.fetch(col_set="feature")
-    df_labels = handler.fetch(col_set="label")
+    df_all = handler.fetch()
 
 
     # ==========================================
@@ -46,24 +49,24 @@ if __name__ == "__main__":
     print("📖 正在加载黄金规则...")
     golden_rules = pd.read_csv("golden_rules.csv")
 
-    factor_list = list({row.feature for row in golden_rules.itertuples()})
+    factor_list =  ["LABEL0"] + list({row.feature for row in golden_rules.itertuples()})
     print(f"factor_list = {factor_list}, length = {len(factor_list)}")
 
     # 初始化当天全 False 的信号列
     print("⚙️ 正在匹配买入条件 (OR 逻辑)...")
-    final_buy_signal = pd.Series(False, index=df_features.index)
+    final_buy_signal = pd.Series(False, index=df_all.index)
     for row in golden_rules.itertuples():
         factor = row.feature
         lower = row.interval_left
         upper = row.interval_right
         
-        if factor in df_features.columns:
+        if factor in df_all.columns:
             # 这里的条件比对会自动在几百天的所有标的上同时完成
-            condition = (df_features[factor] >= lower) & (df_features[factor] < upper)
+            condition = (df_all[factor] >= lower) & (df_all[factor] < upper)
             final_buy_signal = final_buy_signal | condition
 
     # 提取触发了买入的记录
-    buy_records = df_features.loc[final_buy_signal, factor_list].reset_index()
+    buy_records = df_all.loc[final_buy_signal, factor_list].reset_index()
 
     output_path = "qlib_golden_signals.csv"
     buy_records.to_csv(output_path, index=False)
@@ -71,3 +74,5 @@ if __name__ == "__main__":
     print(f"✅ 信号生成完毕！日期: {TARGET_DATE}")
     print(f"📂 JSON 已保存至: {output_path}")
     print(f"📈 共生成了 {len(buy_records)} 条买入指令。")
+    end_time = time.time()
+    print(f"共用时： {(end_time - start_time):.0f}秒")
