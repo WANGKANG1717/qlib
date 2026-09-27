@@ -2,7 +2,7 @@
 setlocal
 
 set "QLIB_ROOT=C:\Users\WANGKANG\Desktop\qlib"
-set "JUPYTER_TOKEN=token"
+set "JUPYTER_TOKEN="
 
 "C:\Users\WANGKANG\miniconda3\envs\qlib\Scripts\jupyter-server.exe" ^
   --ServerApp.root_dir="%QLIB_ROOT%" ^
