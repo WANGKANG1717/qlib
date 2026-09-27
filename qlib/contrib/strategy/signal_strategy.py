@@ -194,15 +194,15 @@ class TopkDropoutStrategy(BaseSignalStrategy):
         cash = current_temp.get_cash()
         current_stock_list = current_temp.get_stock_list()
         # last position (sorted by score)
-        last = pred_score.reindex(current_stock_list).sort_values(ascending=False).index
+        last = pred_score.reindex(current_stock_list).sort_values(ascending=False, kind='mergesort').index
         # The new stocks today want to buy **at most**
         if self.method_buy == "top":
             today = get_first_n(
-                pred_score[~pred_score.index.isin(last)].sort_values(ascending=False).index,
+                pred_score[~pred_score.index.isin(last)].sort_values(ascending=False, kind='mergesort').index,
                 self.n_drop + self.topk - len(last),
             )
         elif self.method_buy == "random":
-            topk_candi = get_first_n(pred_score.sort_values(ascending=False).index, self.topk)
+            topk_candi = get_first_n(pred_score.sort_values(ascending=False, kind='mergesort').index, self.topk)
             candi = list(filter(lambda x: x not in last, topk_candi))
             n = self.n_drop + self.topk - len(last)
             try:
@@ -213,7 +213,7 @@ class TopkDropoutStrategy(BaseSignalStrategy):
             raise NotImplementedError(f"This type of input is not supported")
         # combine(new stocks + last stocks),  we will drop stocks from this list
         # In case of dropping higher score stock and buying lower score stock.
-        comb = pred_score.reindex(last.union(pd.Index(today))).sort_values(ascending=False).index
+        comb = pred_score.reindex(last.union(pd.Index(today))).sort_values(ascending=False, kind='mergesort').index
 
         # Get the stock list we really want to sell (After filtering the case that we sell high and buy low)
         if self.method_sell == "bottom":
