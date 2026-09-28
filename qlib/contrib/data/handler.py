@@ -162,3 +162,23 @@ class Alpha158(DataHandlerLP):
 class Alpha158vwap(Alpha158):
     def get_label_config(self):
         return ["Ref($vwap, -2)/Ref($vwap, -1) - 1"], ["LABEL0"]
+
+""" 自定义Alpha158，可以定义保存什么因子 """
+class CustomAlpha158(Alpha158):
+    def __init__(self, keep_factors, **kwargs):
+        self.keep_factors = set(keep_factors)
+        super().__init__(**kwargs)
+
+    def get_feature_config(self):
+        # 1. 获取官方原版 Alpha158 的全部公式(exprs)和名称(names)
+        exprs, names = Alpha158.get_feature_config(self)
+        
+        # 2. 根据你传入的列表进行精确过滤
+        new_exprs = []
+        new_names = []
+        for expr, name in zip(exprs, names):
+            if name in self.keep_factors:
+                new_exprs.append(expr)
+                new_names.append(name)
+                
+        return new_exprs, new_names
