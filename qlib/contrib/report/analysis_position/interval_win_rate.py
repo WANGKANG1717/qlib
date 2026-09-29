@@ -35,7 +35,7 @@ def calculate_interval_win_rate(
     result["interval_left"] = result["bin_id"] * bin_width
     result["interval_right"] = (result["bin_id"] + 1) * bin_width
     result["ic_interval"] = result.apply(
-        lambda row: f"[{row['interval_left']:.2f}, {row['interval_right']:.2f})",
+        lambda row: f"[{row['interval_left']:.4f}, {row['interval_right']:.4f})",
         axis=1,
     )
     result["win_rate"] = result["win_count"] / result["sample_count"]
