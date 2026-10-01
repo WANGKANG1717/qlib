@@ -157,7 +157,7 @@ def pred_autocorr_all(pred_dict, n_jobs=-1, **kwargs):
     return complex_parallel(Parallel(n_jobs=n_jobs, verbose=10), ac_dict)
 
 
-def calc_ic(pred: pd.Series, label: pd.Series, date_col="datetime", dropna=False) -> (pd.Series, pd.Series):
+def calc_ic(pred: pd.Series, label: pd.Series, date_col="datetime", dropna=False) -> tuple[pd.Series, pd.Series]:
     """calc_ic.
 
     Parameters
