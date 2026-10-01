@@ -11,6 +11,8 @@ from ...data.dataset.handler import DataHandlerLP
 from ...model.interpret.base import LightGBMFInt
 from ...data.dataset.weight import Reweighter
 from qlib.workflow import R
+from sklearn.preprocessing import StandardScaler
+from sklearn.decomposition import PCA
 
 
 class LGBModel(ModelFT, LightGBMFInt):
@@ -124,3 +126,85 @@ class LGBModel(ModelFT, LightGBMFInt):
             valid_names=["train"],
             callbacks=[verbose_eval_callback],
         )
+
+
+class PCALGBModel(LGBModel):
+    """自带 PCA 降维工作流的 LightGBM 模型"""
+
+    def __init__(self, loss="mse", early_stopping_rounds=50, num_boost_round=1000, n_components=10, **kwargs):
+        super().__init__(
+            loss=loss, 
+            early_stopping_rounds=early_stopping_rounds, 
+            num_boost_round=num_boost_round, 
+            **kwargs
+        )
+        # 2. 挂载额外的 PCA 组件
+        self.n_components = n_components
+        self.scaler = StandardScaler()
+        self.pca = PCA(n_components=self.n_components)
+        self._is_pca_fitted = False
+
+    def _prepare_data(self, dataset: DatasetH, reweighter=None) -> List[Tuple[lgb.Dataset, str]]:
+        """重写父类的数据准备方法，在灌入 Dataset 之前拦截并进行 PCA 降维"""
+        ds_l = []
+        assert "train" in dataset.segments
+        
+        for key in ["train", "valid"]:
+            if key in dataset.segments:
+                df = dataset.prepare(key, col_set=["feature", "label"], data_key=DataHandlerLP.DK_L)
+                if df.empty:
+                    raise ValueError("Empty data from dataset, please check your dataset config.")
+                
+                x, y = df["feature"], df["label"]
+
+                # ==========================================
+                # 注入 PCA 机制
+                # ==========================================
+                x_vals = x.fillna(0).values
+                if key == "train":
+                    x_vals = self.scaler.fit_transform(x_vals)
+                    x_vals = self.pca.fit_transform(x_vals)
+                    self._is_pca_fitted = True
+                else: # "valid"
+                    x_vals = self.scaler.transform(x_vals)
+                    x_vals = self.pca.transform(x_vals)
+                
+                # 定义降维后的列名，保证 lgb.Dataset 知道特征名 (PC1, PC2...)
+                pca_feature_names = [f"PC{i+1}" for i in range(self.n_components)]
+                # ==========================================
+
+                # 复用父类的标签和权重处理逻辑
+                if y.values.ndim == 2 and y.values.shape[1] == 1:
+                    y = np.squeeze(y.values)
+                else:
+                    raise ValueError("LightGBM doesn't support multi-label training")
+
+                if reweighter is None:
+                    w = None
+                elif isinstance(reweighter, Reweighter):
+                    w = reweighter.reweight(df)
+                else:
+                    raise ValueError("Unsupported reweighter type.")
+                
+                # 注意：传入的是降维后的 x_vals 以及自定义的 feature_name
+                ds_l.append((lgb.Dataset(x_vals, label=y, weight=w, free_raw_data=False, feature_name=pca_feature_names), key))
+                
+        return ds_l
+
+    def predict(self, dataset: DatasetH, segment: Union[Text, slice] = "test"):
+        """重写父类的预测方法，截获推理视图并应用已拟合的 PCA"""
+        if self.model is None or not getattr(self, "_is_pca_fitted", False):
+            raise ValueError("model or PCA is not fitted yet!")
+            
+        x_test = dataset.prepare(segment, col_set="feature", data_key=DataHandlerLP.DK_I)
+        
+        # ==========================================
+        # 注入 PCA 机制
+        # ==========================================
+        x_vals = x_test.fillna(0).values
+        x_vals = self.scaler.transform(x_vals)
+        x_vals = self.pca.transform(x_vals)
+        # ==========================================
+        
+        # 输出的 MultiIndex 与父类保持一致
+        return pd.Series(self.model.predict(x_vals), index=x_test.index), x_test, x_vals
