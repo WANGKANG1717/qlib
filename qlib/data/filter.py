@@ -9,7 +9,7 @@ import pandas as pd
 import numpy as np
 import abc
 
-from .data import Cal, DatasetD
+from .data import Cal, DatasetD, D
 
 
 class BaseDFilter(abc.ABC):
@@ -372,4 +372,47 @@ class ExpressionDFilter(SeriesDFilter):
             "filter_start_time": str(self.filter_start_time) if self.filter_start_time else self.filter_start_time,
             "filter_end_time": str(self.filter_end_time) if self.filter_end_time else self.filter_end_time,
             "keep": self.keep,
+        }
+
+
+class CSRankVolumeFilter(SeriesDFilter):
+    def __init__(self, min_pct=0.0, max_pct=1.0, window=7, filter_start_time=None, filter_end_time=None, **kwargs):
+        super().__init__(filter_start_time, filter_end_time)
+
+        self.min_pct = min_pct
+        self.max_pct = max_pct
+        self.window = window
+        self.expr = f"Mean($volume * $vwap, {self.window})"
+
+    def _getFilterSeries(self, instruments, fstart, fend):
+        # 1. 使用官方 D.features 提取所有币种绝对成交额均值
+        # 返回的是一个包含 (datetime, instrument) 多重索引的 DataFrame
+        df = D.features(instruments, [self.expr], fstart, fend, freq=self.filter_freq)
+        val_series = df.iloc[:, 0]
+
+        # 2. 截面排名 (数值在 0.0 到 1.0 之间，1.0 代表成交额最大)
+        rank_series = val_series.groupby(level="datetime").rank(pct=True)
+
+        # 3. 掐头去尾：同时满足 >= min_pct 且 <= max_pct 才能保留
+        return (rank_series >= self.min_pct) & (rank_series <= self.max_pct)
+
+    @staticmethod
+    def from_config(config):
+        return CSRankVolumeFilter(
+            min_pct=config.get("min_pct", 0.0),
+            max_pct=config.get("max_pct", 1.0),
+            window=config.get("window", 7),
+            filter_start_time=config.get("filter_start_time", None),
+            filter_end_time=config.get("filter_end_time", None),
+        )
+
+    def to_config(self):
+        return {
+            "filter_type": "CSRankVolumeFilter",
+            "min_pct": self.min_pct,
+            "max_pct": self.max_pct,
+            "window": self.window,
+            "expr": self.expr,
+            "filter_start_time": str(self.filter_start_time) if self.filter_start_time else self.filter_start_time,
+            "filter_end_time": str(self.filter_end_time) if self.filter_end_time else self.filter_end_time,
         }
