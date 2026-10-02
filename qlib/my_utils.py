@@ -63,13 +63,14 @@ def risk_analysis__(portfolio_metric_dict, factor_name, freq, print=False):
         pprint(analysis["return_with_cost"])
         pprint(f"The following are analysis results of the excess return with cost({analysis_freq}).")
         pprint(analysis["excess_return_with_cost"])
-    return analysis_dict
+    return analysis_dict, analysis_df
 
 
 # ==========================================
 # 封装单因子的回测 Worker 函数
 # ==========================================
 def run_single_backtest(factor_name, strategy_config, executor_config, backtest_config, other_config):
+    """ need_qlib_init, provider_uri, region, limit_threshold, freq """
     import qlib
     from qlib.backtest import backtest
     from qlib.backtest.executor import SimulatorExecutor
@@ -99,14 +100,15 @@ def run_single_backtest(factor_name, strategy_config, executor_config, backtest_
         # 运行回测
         portfolio_metric_dict, indicator_dict = backtest(executor=executor_obj, strategy=strategy_obj, **backtest_config)
 
-        # 计算评估指标 (假定 risk_analysis__ 是你定义好的函数)
-        analysis_dict = risk_analysis__(portfolio_metric_dict, factor_name, other_config['freq'], print=False)
+        # 计算评估指标
+        analysis_dict, analysis_df = risk_analysis__(portfolio_metric_dict, factor_name, other_config['freq'], print=False)
 
         return {
             # 回测配置，原样透传回去
             "config": config,
             # 输出
             "analysis_dict": analysis_dict,
+            "analysis_df": analysis_df,
             "portfolio_metric_dict": portfolio_metric_dict,
             "indicator_dict": indicator_dict,
         }
@@ -577,3 +579,241 @@ def plot_topk_and_n_drop_matrix(bc_results, show: bool = False):
         fig_3d.show()
 
     return fig_heatmap, fig_3d
+
+
+def plot_data_distribution(df: pd.DataFrame, col_name: str = None, show: bool = True):
+    """ 展示数据分布直方图，默认使用第一列作为标签 """
+    if col_name is None:
+        label_col = df.columns[0]
+    else:
+        label_col = col_name
+    label_data = df[[label_col]].dropna()
+
+    # 使用 plotly express 绘制直方图
+    fig = px.histogram(
+        label_data, 
+        x=label_col, 
+        nbins=100, 
+        title=f"数据分布 {label_col}",
+        labels={label_col: "标签值"},
+        opacity=0.75,
+        color_discrete_sequence=['royalblue'],
+        marginal="box"  # 在顶部附加箱线图，方便查看分布极值与四分位数
+    )
+
+    # 优化图表样式
+    fig.update_layout(
+        yaxis_title="频数",
+        template="plotly_white",
+        title_x=0.5,  # 标题居中
+        font=dict(size=12)
+    )
+
+    # 在 notebook 中显示图表
+    if show:
+        fig.show()
+    return fig
+
+def interactive_signal_dashboard(pred_label: pd.DataFrame):
+    import ipywidgets as widgets
+    from IPython.display import display, clear_output
+
+    # 1. 参数设置：设置要展示的 Top K 和 Bottom K 数量
+    K = 10 
+    # 设置你要单独提取展示的标的名称（根据你的数据源，如果叫 BTCUSDT 请自行修改）
+    BENCHMARK_SYMBOL = "BTC" 
+
+    # 2. 提取所有交易日并排序
+    dates = pred_label.index.get_level_values('datetime').unique().sort_values()
+    # 预先生成所有日期的字符串列表，用于下拉菜单显示
+    date_strs = [d.strftime('%Y-%m-%d') if isinstance(d, pd.Timestamp) else str(d) for d in dates]
+
+    # state 用于记录当前索引，以及防止触发死循环的 updating 锁
+    state = {'idx': 0, 'updating': False}  
+
+    # 3. 创建 UI 组件
+    btc_display = widgets.HTML()  
+    btn_prev = widgets.Button(description="⬅️ 前一天", button_style='info')
+    btn_next = widgets.Button(description="后一天 ➡️", button_style='info')
+
+    date_dropdown = widgets.Dropdown(
+        options=list(zip(date_strs, range(len(dates)))),
+        value=0,
+        description='📅 跳转日期:',
+        layout=widgets.Layout(width='250px', margin='0 20px')
+    )
+
+    out_top = widgets.Output()
+    out_bottom = widgets.Output()
+
+    # =========== 核心修复：独立出底部的总收益显示组件 ===========
+    top_summary_display = widgets.HTML()
+    bot_summary_display = widgets.HTML()
+    # ==========================================================
+
+    # 辅助函数：安全地获取特定日期特定标的的数据
+    def get_symbol_data(dt, symbol):
+        try:
+            row = pred_label.loc[(dt, symbol)]
+            if isinstance(row, pd.DataFrame):
+                row = row.iloc[0]
+            return row['score'], row['label']
+        except KeyError:
+            return None, None
+
+    # 辅助函数：将数值格式化为带颜色的 HTML 文本
+    def format_val_html(val, is_label=False):
+        if pd.isna(val):
+            return "<span style='color: #888;'>暂无数据</span>"
+        
+        if is_label:
+            color = "#00ff00" if val > 0 else "#ff5252" if val < 0 else "#ffffff"
+            return f"<span style='color: {color}; font-weight: bold;'>{val:+.4%}</span>"
+        else:
+            return f"<span style='color: #64b5f6; font-weight: bold;'>{val:.6f}</span>"
+
+    # 4. 核心更新逻辑
+    def update_dashboard(index):
+        # 【同步 UI】: 确保点按钮时，下拉框的显示也能跟着变，加锁防止重复触发
+        state['updating'] = True
+        date_dropdown.value = index
+        state['updating'] = False
+        
+        current_date = dates[index]
+        date_str = date_strs[index]
+        
+        # 获取并渲染 BTC 顶部数据
+        curr_score, curr_label = get_symbol_data(current_date, BENCHMARK_SYMBOL)
+        if index > 0:
+            prev_date = dates[index - 1]
+            prev_score, prev_label = get_symbol_data(prev_date, BENCHMARK_SYMBOL)
+            prev_date_str = date_strs[index - 1]
+        else:
+            prev_score, prev_label = None, None
+            prev_date_str = "无前日记录"
+            
+        btc_html = f"""
+            <div style="background-color: #1e1e1e; padding: 15px 20px; border-radius: 8px; margin-bottom: 15px; border: 1px solid #444; display: flex; justify-content: space-around; align-items: center; box-shadow: 0 4px 6px rgba(0,0,0,0.3);">
+                <div style="text-align: center; flex: 1;">
+                    <h4 style="margin: 0 0 10px 0; color: #aaa;">⏪ 前日 ({BENCHMARK_SYMBOL}) - <span style="font-weight:normal;">{prev_date_str}</span></h4>
+                    <div style="font-size: 15px; color: #ccc;">
+                        得分: {format_val_html(prev_score, False)} &nbsp;&nbsp;|&nbsp;&nbsp; 收益: {format_val_html(prev_label, True)}
+                    </div>
+                </div>
+                <div style="border-left: 2px dashed #555; height: 50px; margin: 0 20px;"></div>
+                <div style="text-align: center; flex: 1;">
+                    <h4 style="margin: 0 0 10px 0; color: #fff;">▶️ 当日 ({BENCHMARK_SYMBOL}) - <span style="font-weight:normal;">{date_str}</span></h4>
+                    <div style="font-size: 17px; color: #fff;">
+                        得分: {format_val_html(curr_score, False)} &nbsp;&nbsp;|&nbsp;&nbsp; 收益: {format_val_html(curr_label, True)}
+                    </div>
+                </div>
+            </div>
+        """
+        btc_display.value = btc_html
+        
+        # 截取当天数据并按 score 降序排列
+        day_df = pred_label.xs(current_date, level='datetime').sort_values(by='score', ascending=False)
+        
+        max_abs_label = day_df['label'].abs().max()
+        if pd.isna(max_abs_label) or max_abs_label == 0:
+            max_abs_label = 1  
+        
+        def style_label(val):
+            if pd.isna(val) or val == 0:
+                return ''
+            ratio = min(abs(val) / max_abs_label, 1.0)
+            alpha = 0.15 + 0.7 * ratio
+            if val > 0:
+                return f'background-color: rgba(0, 200, 83, {alpha}); '
+            else:
+                return f'background-color: rgba(213, 0, 0, {alpha});'
+
+        top_k_df = day_df.head(K)
+        bottom_k_df = day_df.tail(K)
+        
+        # 计算统计汇总数据
+        top_total_ret = top_k_df['label'].sum(skipna=True)
+        top_mean_ret = top_k_df['label'].mean(skipna=True)
+        
+        bot_total_ret = bottom_k_df['label'].sum(skipna=True)
+        bot_mean_ret = bottom_k_df['label'].mean(skipna=True)
+        
+        style_method = 'map' if hasattr(top_k_df.style, 'map') else 'applymap'
+        
+        styled_top = top_k_df.style\
+            .background_gradient(cmap='Greens', subset=['score'])\
+            .format({'score': '{:.6f}', 'label': '{:.6f}'})
+        getattr(styled_top, style_method)(style_label, subset=['label'])
+            
+        styled_bottom = bottom_k_df.style\
+            .background_gradient(cmap='Reds', subset=['score'])\
+            .format({'score': '{:.6f}', 'label': '{:.6f}'})
+        getattr(styled_bottom, style_method)(style_label, subset=['label'])
+        
+        # 表格渲染区域：仅更新表格内容
+        with out_top:
+            clear_output(wait=True)
+            print(f"🟢 Top {K} 标的 (得分最高)")
+            display(styled_top)
+            
+        with out_bottom:
+            clear_output(wait=True)
+            print(f"🔴 Bottom {K} 标的 (得分最低)")
+            display(styled_bottom)
+
+        t_color = "#00ff00" if top_total_ret > 0 else "#ff5252" if top_total_ret < 0 else "#ffffff"
+        top_summary_display.value = (
+            f"<div style='margin-top: 8px; padding: 6px; border: 1px solid #444; border-radius: 4px; text-align: center; background-color: #1e1e1e; font-size: 14px; color: #eeeeee;'>"
+            f"总收益: <span style='color: {t_color}; font-weight: bold;'>{top_total_ret:+.4%}</span> &nbsp;&nbsp;|&nbsp;&nbsp; "
+            f"均值: <span style='color: {t_color};'>{top_mean_ret:+.4%}</span></div>"
+        )
+        
+        b_color = "#00ff00" if bot_total_ret > 0 else "#ff5252" if bot_total_ret < 0 else "#ffffff"
+        bot_summary_display.value = (
+            f"<div style='margin-top: 8px; padding: 6px; border: 1px solid #444; border-radius: 4px; text-align: center; background-color: #1e1e1e; font-size: 14px; color: #eeeeee;'>"
+            f"总收益: <span style='color: {b_color}; font-weight: bold;'>{bot_total_ret:+.4%}</span> &nbsp;&nbsp;|&nbsp;&nbsp; "
+            f"均值: <span style='color: {b_color};'>{bot_mean_ret:+.4%}</span></div>"
+        )
+        # =================================================================
+
+    # 5. 按钮与下拉框事件回调
+    def on_prev_clicked(b):
+        if state['idx'] > 0:
+            state['idx'] -= 1
+            update_dashboard(state['idx'])
+
+    def on_next_clicked(b):
+        if state['idx'] < len(dates) - 1:
+            state['idx'] += 1
+            update_dashboard(state['idx'])
+
+    def on_dropdown_change(change):
+        if change['name'] == 'value' and not state['updating']:
+            state['idx'] = change['new']
+            update_dashboard(state['idx'])
+
+    btn_prev.on_click(on_prev_clicked)
+    btn_next.on_click(on_next_clicked)
+    date_dropdown.observe(on_dropdown_change)
+
+    # 6. 页面布局与展示
+    controls = widgets.HBox(
+        [btn_prev, date_dropdown, btn_next], 
+        layout=widgets.Layout(justify_content='center', align_items='center', margin='10px 0 20px 0')
+    )
+
+    # =========== 核心修复：将单独的表格 Output 和独立的汇总 HTML 组合打包起来 ===========
+    tables = widgets.HBox(
+        [
+            widgets.VBox([out_top, top_summary_display]), 
+            widgets.VBox([out_bottom, bot_summary_display])
+        ],
+        layout=widgets.Layout(justify_content='space-around')
+    )
+    # ===========================================================================
+
+    # 初始化
+    update_dashboard(state['idx'])
+
+    # 组装完整的 UI
+    display(widgets.VBox([btc_display, controls, tables]))
