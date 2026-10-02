@@ -315,11 +315,11 @@ def model_performance_graph(
     N: int = 5,
     reverse=False,
     rank=False,
-    graph_names: list = ["group_return", "pred_ic", "pred_autocorr"],
+    graph_names: list = ["group_return", "pred_ic", "pred_autocorr", "pred_turnover"],
     show_notebook: bool = True,
     show_nature_day: bool = False,
     **kwargs,
-) -> [list, tuple]:
+) -> list | tuple:
     r"""Model performance
 
     :param pred_label: index is **pd.MultiIndex**, index name is **[instrument, datetime]**; columns names is **[score, label]**.
