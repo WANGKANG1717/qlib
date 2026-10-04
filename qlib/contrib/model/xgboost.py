@@ -30,43 +30,62 @@ class XGBModel(Model, FeatureInt):
         reweighter=None,
         **kwargs,
     ):
-        df_train, df_valid = dataset.prepare(
-            ["train", "valid"],
-            col_set=["feature", "label"],
-            data_key=DataHandlerLP.DK_L,
-        )
-        x_train, y_train = df_train["feature"], df_train["label"]
-        x_valid, y_valid = df_valid["feature"], df_valid["label"]
+        if evals_result is None:
+            evals_result = {}
+            
+        evals = []
+        dtrain = None
+        
+        # 确保 train segment 存在
+        assert "train" in dataset.segments, "The 'train' segment is required."
 
-        # Lightgbm need 1D array as its label
-        if y_train.values.ndim == 2 and y_train.values.shape[1] == 1:
-            y_train_1d, y_valid_1d = np.squeeze(y_train.values), np.squeeze(y_valid.values)
-        else:
-            raise ValueError("XGBoost doesn't support multi-label training")
+        # 动态处理 train 和 optional 的 valid 数据集
+        for key in ["train", "valid"]:
+            if key in dataset.segments:
+                df = dataset.prepare(
+                    key,
+                    col_set=["feature", "label"],
+                    data_key=DataHandlerLP.DK_L,
+                )
+                if df.empty:
+                    raise ValueError(f"Empty data from dataset segment '{key}', please check your dataset config.")
 
-        if reweighter is None:
-            w_train = None
-            w_valid = None
-        elif isinstance(reweighter, Reweighter):
-            w_train = reweighter.reweight(df_train)
-            w_valid = reweighter.reweight(df_valid)
-        else:
-            raise ValueError("Unsupported reweighter type.")
+                x, y = df["feature"], df["label"]
 
-        dtrain = xgb.DMatrix(x_train.values, label=y_train_1d, weight=w_train)
-        dvalid = xgb.DMatrix(x_valid.values, label=y_valid_1d, weight=w_valid)
+                # XGBoost 需要 1D array 作为 label
+                if y.values.ndim == 2 and y.values.shape[1] == 1:
+                    y_1d = np.squeeze(y.values)
+                else:
+                    raise ValueError("XGBoost doesn't support multi-label training")
+
+                if reweighter is None:
+                    w = None
+                elif isinstance(reweighter, Reweighter):
+                    w = reweighter.reweight(df)
+                else:
+                    raise ValueError("Unsupported reweighter type.")
+
+                dmatrix = xgb.DMatrix(x.values, label=y_1d, weight=w)
+                evals.append((dmatrix, key))
+                
+                if key == "train":
+                    dtrain = dmatrix
+
         self.model = xgb.train(
             self._params,
             dtrain=dtrain,
             num_boost_round=num_boost_round,
-            evals=[(dtrain, "train"), (dvalid, "valid")],
+            evals=evals,
             early_stopping_rounds=early_stopping_rounds,
             verbose_eval=verbose_eval,
             evals_result=evals_result,
             **kwargs,
         )
-        evals_result["train"] = list(evals_result["train"].values())[0]
-        evals_result["valid"] = list(evals_result["valid"].values())[0]
+        
+        # 仅对存在于 evals_result 中的 key 进行后处理
+        for key in ["train", "valid"]:
+            if key in evals_result:
+                evals_result[key] = list(evals_result[key].values())[0]
 
     def predict(self, dataset: DatasetH, segment: Union[Text, slice] = "test"):
         if self.model is None:
