@@ -206,7 +206,7 @@ class TopkDropoutStrategy(BaseSignalStrategy):
             candi = list(filter(lambda x: x not in last, topk_candi))
             n = self.n_drop + self.topk - len(last)
             try:
-                today = np.random.choice(candi, n, replace=False)
+                today = np.random.choice(candi, n, replace=False).tolist()
             except ValueError:
                 today = candi
         else:
@@ -221,7 +221,7 @@ class TopkDropoutStrategy(BaseSignalStrategy):
         elif self.method_sell == "random":
             candi = filter_stock(last)
             try:
-                sell = pd.Index(np.random.choice(candi, self.n_drop, replace=False) if len(last) else [])
+                sell = np.random.choice(candi, self.n_drop, replace=False).tolist() if len(last) else []
             except ValueError:  # No enough candidates
                 sell = candi
         else:
