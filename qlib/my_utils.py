@@ -38,6 +38,7 @@ def risk_analysis__(portfolio_metric_dict, factor_name, freq, print=False):
     from qlib.contrib.evaluate import risk_analysis
     from qlib.utils import flatten_dict
     from qlib.utils.time import Freq
+    from pprint import pprint
 
     analysis_freq = "{0}{1}".format(*Freq.parse(freq))
     # backtest info

@@ -376,13 +376,13 @@ class ExpressionDFilter(SeriesDFilter):
 
 
 class CSRankVolumeFilter(SeriesDFilter):
-    def __init__(self, min_pct=0.0, max_pct=1.0, window=7, filter_start_time=None, filter_end_time=None, **kwargs):
+    def __init__(self, min_pct=0.0, max_pct=1.0, window=7, filter_start_time=None, filter_end_time=None, amount="$volume * $vwap", **kwargs):
         super().__init__(filter_start_time, filter_end_time)
 
         self.min_pct = min_pct
         self.max_pct = max_pct
         self.window = window
-        self.expr = f"Mean($volume * $vwap, {self.window})"
+        self.expr = f"Mean({amount}, {self.window})"
 
     def _getFilterSeries(self, instruments, fstart, fend):
         # 1. 使用官方 D.features 提取所有币种绝对成交额均值
